@@ -14,11 +14,18 @@ class GeminiAPI(QObject):
     response_received = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     
+    # Expose some common Gemini models for selection
+    AVAILABLE_MODELS = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+
     def __init__(self):
         super().__init__()
         self.settings = QSettings()
         self.api_key = self.settings.value("qgis_copilot/api_key", "")
-        self.model = "gemini-1.5-flash"
+        # Load saved model or default to a sensible choice
+        self.model = self.settings.value("qgis_copilot/gemini_model", self.AVAILABLE_MODELS[0])
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
         
         # System prompt for PyQGIS context - Based on PyQGIS Developer Cookbook
@@ -175,6 +182,12 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         """Set and save the Gemini API key"""
         self.api_key = api_key
         self.settings.setValue("qgis_copilot/api_key", api_key)
+    
+    def set_model(self, model_name):
+        """Set and save the Gemini model"""
+        if model_name in self.AVAILABLE_MODELS:
+            self.model = model_name
+            self.settings.setValue("qgis_copilot/gemini_model", model_name)
     
     def get_api_key(self):
         """Get the stored API key"""

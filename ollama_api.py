@@ -5,7 +5,7 @@ Ollama (Local) API Integration for QGIS Copilot
 import json
 import requests
 from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
-from qgis.core import QgsMessageLog, Qgis
+from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
 class OllamaAPI(QObject):
@@ -104,7 +104,55 @@ Always return complete, runnable scripts when modifying prior code.
             else:
                 error_msg = f"API Error {response.status_code}: {response.text}"
                 self.error_occurred.emit(error_msg)
-                QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
+            QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
+
+    def get_qgis_context(self, iface):
+        """Extract current QGIS context information (same shape as other providers)."""
+        try:
+            context_info = []
+            project = QgsProject.instance()
+            if project:
+                context_info.append(f"Project: {project.fileName() or 'Unsaved Project'}")
+                if project.title():
+                    context_info.append(f"Project Title: {project.title()}")
+                context_info.append(f"Project CRS: {project.crs().authid()}")
+
+            if iface:
+                active_layer = iface.activeLayer()
+                if active_layer:
+                    context_info.append(f"Active Layer: {active_layer.name()} ({active_layer.type().name})")
+                    if hasattr(active_layer, 'featureCount'):
+                        context_info.append(f"Feature Count: {active_layer.featureCount()}")
+                    if hasattr(active_layer, 'selectedFeatureCount'):
+                        selected_count = active_layer.selectedFeatureCount()
+                        if selected_count > 0:
+                            context_info.append(f"Selected Features: {selected_count}")
+
+                canvas = iface.mapCanvas()
+                if canvas:
+                    extent = canvas.extent()
+                    context_info.append(f"Map Extent: {extent.toString()}")
+                    context_info.append(f"Map CRS: {canvas.mapSettings().destinationCrs().authid()}")
+                    context_info.append(f"Map Scale: 1:{canvas.scale():,.0f}")
+
+            if project:
+                layers = project.mapLayers().values()
+                context_info.append(f"Total Layers: {len(layers)}")
+
+                try:
+                    layer_types = {l_type.name: 0 for l_type in QgsMapLayer.LayerType.values()}
+                    for layer in layers:
+                        layer_types[layer.type().name] += 1
+                    type_summary = ", ".join([f"{count} {l_type}" for l_type, count in layer_types.items() if count > 0])
+                    if type_summary:
+                        context_info.append(f"Layer Types: {type_summary}")
+                except Exception:
+                    pass
+
+            return "\n".join(context_info)
+        except Exception as e:
+            QgsMessageLog.logMessage(f"Error getting context: {str(e)}", "QGIS Copilot", level=Qgis.Warning)
+            return "Context information unavailable"
 
         except Exception as e:
             error_msg = f"Request to Ollama failed: {str(e)}"

@@ -13,7 +13,7 @@ from qgis.core import (
     QgsVectorLayer, QgsRasterLayer, QgsMapLayer, QgsWkbTypes
 )
 from qgis.gui import QgsMapCanvas
-from qgis.PyQt.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant
 
 
 class PyQGISExecutor(QObject):
@@ -44,6 +44,7 @@ class PyQGISExecutor(QObject):
             'QgsMessageLog': QgsMessageLog,
             'QgsWkbTypes': QgsWkbTypes,
             'Qgis': Qgis,
+            'QVariant': QVariant,
             
             # Python built-ins (safe subset)
             'print': print,
@@ -105,36 +106,39 @@ class PyQGISExecutor(QObject):
     def is_safe_code(self, code):
         """Check if code is safe to execute"""
         # List of potentially dangerous operations
-        dangerous_patterns = [
-            r'import\s+os',
-            r'import\s+subprocess',
-            r'import\s+sys',
-            r'from\s+os',
-            r'from\s+subprocess',
-            r'exec\s*\(',
-            r'eval\s*\(',
-            r'__import__',
-            r'open\s*\(',
-            r'file\s*\(',
-            r'compile\s*\(',
-            r'globals\s*\(',
-            r'locals\s*\(',
-            r'vars\s*\(',
-            r'dir\s*\(',
-            r'delattr',
-            r'setattr',
-            r'hasattr',
-            r'reload',
-            r'input\s*\(',
-            r'raw_input\s*\(',
-            r'\.system\s*\(',
-            r'\.popen\s*\(',
-            r'\.call\s*\(',
+        # (pattern, message)
+        disallowed_patterns = [
+            (r'import\s+qgis', "Do not import 'qgis' modules; they are pre-loaded."),
+            (r'from\s+qgis', "Do not import from 'qgis' modules; they are pre-loaded."),
+            (r'import\s+os', "Importing 'os' is not allowed for security reasons."),
+            (r'import\s+subprocess', "Importing 'subprocess' is not allowed for security reasons."),
+            (r'import\s+sys', "Importing 'sys' is not allowed. Use the provided environment."),
+            (r'from\s+os', "Importing from 'os' is not allowed."),
+            (r'from\s+subprocess', "Importing from 'subprocess' is not allowed."),
+            (r'exec\s*\(', "Use of 'exec' is not allowed."),
+            (r'eval\s*\(', "Use of 'eval' is not allowed."),
+            (r'__import__', "Use of '__import__' is not allowed."),
+            (r'open\s*\(', "File I/O with 'open' is not allowed."),
+            (r'file\s*\(', "File I/O with 'file' is not allowed."),
+            (r'compile\s*\(', "Use of 'compile' is not allowed."),
+            (r'globals\s*\(', "Accessing 'globals()' is not allowed."),
+            (r'locals\s*\(', "Accessing 'locals()' is not allowed."),
+            (r'vars\s*\(', "Accessing 'vars()' is not allowed."),
+            (r'dir\s*\(', "Use of 'dir()' is not allowed."),
+            (r'delattr', "Use of 'delattr' is not allowed."),
+            (r'setattr', "Use of 'setattr' is not allowed."),
+            (r'hasattr', "Use of 'hasattr' is not allowed."),
+            (r'reload', "Use of 'reload' is not allowed."),
+            (r'input\s*\(', "Use of 'input()' is not allowed for security."),
+            (r'raw_input\s*\(', "Use of 'raw_input()' is not allowed for security."),
+            (r'\.system\s*\(', "Calling 'system' is not allowed."),
+            (r'\.popen\s*\(', "Calling 'popen' is not allowed."),
+            (r'\.call\s*\(', "Calling 'call' is not allowed."),
         ]
         
-        for pattern in dangerous_patterns:
+        for pattern, msg in disallowed_patterns:
             if re.search(pattern, code, re.IGNORECASE):
-                return False, f"Potentially dangerous operation detected: {pattern}"
+                return False, f"Disallowed operation: {msg}"
         
         return True, "Code appears safe"
     
@@ -144,7 +148,7 @@ class PyQGISExecutor(QObject):
         is_safe, safety_msg = self.is_safe_code(code)
         if not is_safe:
             self.execution_completed.emit(
-                f"Execution blocked: {safety_msg}", 
+                f"Execution blocked. {safety_msg}",
                 False
             )
             return

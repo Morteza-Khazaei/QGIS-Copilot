@@ -5,16 +5,18 @@ QGIS Copilot Chat Dialog - Main UI for the chat interface
 import os
 import json
 import re
+import base64
+import html
 from datetime import datetime
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit,
     QPushButton, QSplitter, QLabel, QCheckBox, QGroupBox,
-    QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog,
-    QComboBox
+    QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
+    QToolTip
 )
-from qgis.PyQt.QtGui import QTextCursor
-from qgis.core import QgsMessageLog, Qgis
+from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices
+from qgis.core import QgsMessageLog, Qgis, QgsApplication
 
 from .gemini_api import GeminiAPI
 from .openai_api import OpenAIAPI
@@ -256,12 +258,11 @@ class CopilotChatDialog(QDialog):
         """Setup styling for the chat display"""
         self.chat_display.setStyleSheet("""
             QTextBrowser {
-                background-color: #f8f9fa;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
+                background-color: #ffffff;
+                border: none;
                 font-family: 'Segoe UI', Arial, sans-serif;
                 font-size: 10pt;
-                line-height: 1.4;
+                padding: 5px;
             }
         """)
     
@@ -281,6 +282,7 @@ class CopilotChatDialog(QDialog):
         # UI signals
         self.api_provider_combo.currentTextChanged.connect(self.on_api_provider_changed)
         self.model_selection_combo.currentTextChanged.connect(self.on_model_changed)
+        self.chat_display.anchorClicked.connect(self.handle_anchor_click)
 
     def on_api_provider_changed(self, provider_name):
         """Handle API provider change"""
@@ -296,6 +298,23 @@ class CopilotChatDialog(QDialog):
 
         if hasattr(self.current_api, 'set_model'):
             self.current_api.set_model(model_name)
+
+    def handle_anchor_click(self, url):
+        """Handle clicks on links in the chat display."""
+        if url.scheme() == 'copy-code':
+            # The encoded code is everything after the scheme and '://'
+            encoded_code = url.toString().split('://', 1)[1]
+            try:
+                decoded_code = base64.b64decode(encoded_code.encode('utf-8')).decode('utf-8')
+                clipboard = QgsApplication.clipboard()
+                clipboard.setText(decoded_code)
+                QToolTip.showText(QCursor.pos(), "Copied to clipboard!", self, msec=2000)
+            except Exception as e:
+                QgsMessageLog.logMessage(f"Could not copy code to clipboard: {e}", "QGIS Copilot", level=Qgis.Warning)
+                QToolTip.showText(QCursor.pos(), "Copy failed!", self, msec=2000)
+        else:
+            # Open external links in a browser
+            QDesktopServices.openUrl(url)
 
     def update_api_settings_ui(self):
         """Update settings UI based on selected provider"""
@@ -477,18 +496,38 @@ To use Claude, you need an Anthropic API key:<br>
         """Renders a single message to the chat display"""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
+
+        is_user = (sender == "You")
+        align = "right" if is_user else "left"
         
-        # Add timestamp and sender
-        # Format the message
-        html_message = f"""
-        <div style="margin-bottom: 10px; padding: 8px; border-left: 3px solid {color}; background-color: #f8f9fa;">
-            <strong style="color: {color};">{sender}</strong> 
-            <span style="color: #6c757d; font-size: 9pt;">({timestamp})</span><br>
-            <div style="margin-top: 5px;">{self.format_message_content(message)}</div>
+        bubble_bg_color = "#e7f5ff" if is_user else "#f8f9fa"
+        bubble_border_color = "#cce5ff" if is_user else "#dee2e6"
+
+        # Main div for alignment
+        html = f'<div style="margin: 0 5px; text-align: {align};">'
+        
+        # The bubble
+        html += f"""
+        <div style="
+            display: inline-block;
+            text-align: left;
+            max-width: 85%;
+            padding: 8px 12px;
+            border-radius: 12px;
+            background-color: {bubble_bg_color};
+            border: 1px solid {bubble_border_color};
+            margin-top: 5px;
+            margin-bottom: 5px;
+        ">
+            <div>
+                <strong style="color: {color};">{sender}</strong> 
+                <span style="color: #6c757d; font-size: 8pt;">({timestamp})</span>
+            </div>
+            <div style="margin-top: 5px; white-space: pre-wrap; word-wrap: break-word;">{self.format_message_content(message)}</div>
         </div>
-        """
-        
-        cursor.insertHtml(html_message)
+        </div>"""
+
+        cursor.insertHtml(html)
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
 
@@ -581,17 +620,52 @@ To use Claude, you need an Anthropic API key:<br>
         """Format message content with syntax highlighting for code"""
         # Replace code blocks with formatted HTML
         def format_code_block(match):
-            code = match.group(1)
-            return f'<pre style="background-color: #f8f9fa; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; font-family: monospace; font-size: 9pt; overflow-x: auto;"><code>{code}</code></pre>'
+            code_to_copy = match.group(1).strip()
+            code_to_display = html.escape(code_to_copy)
+            encoded_code = base64.b64encode(code_to_copy.encode('utf-8')).decode('utf-8')
+
+            copy_link = f"""
+            <a href="copy-code://{encoded_code}" style="
+                float: right; 
+                text-decoration: none; 
+                color: #d0d0d0; 
+                background-color: #4e5256;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-family: 'Segoe UI', sans-serif; 
+                font-size: 8pt;
+            ">Copy</a>
+            """
+
+            header = f"""
+            <div style="
+                background-color: #3c3f41; 
+                color: #bbbbbb;
+                padding: 6px 10px; 
+                border: 1px solid #555; 
+                border-bottom: none; 
+                border-top-left-radius: 6px; 
+                border-top-right-radius: 6px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 9pt;
+            ">
+                {copy_link}
+                <span style="font-weight: bold;">PyQGIS Code</span>
+                <div style="clear: both;"></div>
+            </div>
+            """
+            
+            code_block = f"""
+            <pre style="margin: 0; background-color: #2b2b2b; color: #a9b7c6; padding: 10px; border: 1px solid #555; border-top: none; border-radius: 0; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; font-family: 'Consolas', 'Menlo', 'monospace'; font-size: 9pt; overflow-x: auto; white-space: pre;"><code>{code_to_display}</code></pre>
+            """
+
+            return f'<div style="margin-top: 10px; margin-bottom: 10px;">{header}{code_block}</div>'
         
         # Format code blocks
         content = re.sub(r'```(?:python)?\s*\n(.*?)\n```', format_code_block, content, flags=re.DOTALL)
         
         # Format inline code
-        content = re.sub(r'`([^`\n]+)`', r'<code style="background-color: #f8f9fa; padding: 2px 4px; border-radius: 2px; font-family: monospace; font-size: 9pt;">\1</code>', content)
-        
-        # Convert line breaks to HTML
-        content = content.replace('\n', '<br>')
+        content = re.sub(r'`([^`\n]+)`', r'<code style="background-color: #e9ecef; color: #c7254e; padding: 2px 4px; border-radius: 3px; font-family: monospace; font-size: 9pt;">\1</code>', content)
         
         return content
     

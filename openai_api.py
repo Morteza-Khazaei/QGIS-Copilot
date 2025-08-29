@@ -5,7 +5,7 @@ OpenAI API Integration for QGIS Copilot
 import json
 import requests
 from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
-from qgis.core import QgsMessageLog, Qgis, QgsProject
+from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
 class OpenAIAPI(QObject):
@@ -36,14 +36,46 @@ When providing code solutions:
 - Consider error handling when appropriate
 - Do not use functions that require user input in the middle of a script, like `input()`. The user provides input through the chat interface.
 
-Available QGIS context:
-- iface: QgsInterface object for GUI interaction
-- project: The current QgsProject instance (`QgsProject.instance()`)
-- canvas: The map canvas (`iface.mapCanvas()`)
-- The following modules are already imported and available: `core`, `gui`, `analysis`, `processing`.
-- Many common QGIS classes are available directly (e.g., `QgsVectorLayer`, `QgsProject`).
-- For other classes, use the module prefix (e.g., `core.QgsDistanceArea`).
-- Do not include `import` statements for `qgis` modules, as they are blocked. You can import other standard Python libraries if they are not on the blocked list.
+Execution Environment & Rules:
+- **CRITICAL**: Do NOT include `import qgis` or `from qgis import ...` statements. The necessary QGIS modules and classes are already available in the execution environment and these imports will cause the code to fail.
+- You can import standard Python libraries like `random` or `math`.
+
+Available Globals:
+- `iface`, `project`, `canvas`
+- `QgsProject`, `QgsApplication`, `QgsVectorLayer`, `QgsRasterLayer`, `QgsMapLayer`, `QgsMessageLog`, `QgsWkbTypes`, `Qgis`
+- Modules: `core`, `gui`, `analysis`, `processing`
+
+How to use classes:
+- Use global classes like `QgsVectorLayer` directly.
+- For most other QGIS classes, use the `core` prefix. For example: `core.QgsFeature()`, `core.QgsGeometry.fromWkt(...)`, `core.QgsField(...)`.
+
+Example of **CORRECT** code for creating points:
+```python
+# No QGIS imports needed!
+import random
+
+extent = iface.mapCanvas().extent()
+layer = QgsVectorLayer("Point?crs=" + project.crs().authid(), "random_points", "memory")
+provider = layer.dataProvider()
+
+# Add a field for ID.
+provider.addAttributes([core.QgsField("id", 2)]) # 2 is for integer type
+layer.updateFields()
+
+# Create 10 random points
+features = []
+for i in range(10):
+    x = random.uniform(extent.xMinimum(), extent.xMaximum())
+    y = random.uniform(extent.yMinimum(), extent.yMaximum())
+    point = core.QgsPointXY(x, y)
+    feature = core.QgsFeature()
+    feature.setGeometry(core.QgsGeometry.fromPointXY(point))
+    feature.setAttributes([i])
+    features.append(feature)
+
+provider.addFeatures(features)
+project.addMapLayer(layer)
+```
 
 Common Operations Guide:
 - To get the active layer: `layer = iface.activeLayer()`
@@ -52,6 +84,11 @@ Common Operations Guide:
 - To add a layer to the project: `project.addMapLayer(layer)`
 - To run a processing algorithm: `processing.run("native:buffer", {'INPUT': ..., 'DISTANCE': ..., 'OUTPUT': 'memory:'})`
 - To edit attributes, use standard Python types (int, str, float). Avoid using `QVariant` as it is largely unnecessary in QGIS 3.
+- To create a new temporary layer (e.g., for random points), create a "memory" layer. Example: `QgsVectorLayer("Point?crs=epsg:4326", "temporary_points", "memory")`
+
+Be Proactive: If a user's request is slightly ambiguous, make a reasonable assumption and generate code that performs a first version of the task. Always create new layers as temporary memory layers. After providing the code, you can ask clarifying questions to help the user refine the result. For example, if a user asks to 'create random points', assume a reasonable number (e.g., 10) within the current map view, create them on a memory layer, and then ask if they want a different quantity or extent.
+
+Follow-up Suggestions: After providing code, especially code that creates a new layer, always suggest a few potential next steps. Assume the code will be executed successfully. For example, if your code creates a buffer layer, you could then ask the user: "The code above will create a temporary buffer layer. Once it's created, would you like to change its style, run an analysis on it, or save it to a permanent file?" This makes your response more interactive and helpful.
 
 Always prioritize safe operations and warn about potentially destructive actions.
 Be conversational and helpful - you're a copilot, not just a code generator.
@@ -146,13 +183,12 @@ Be conversational and helpful - you're a copilot, not just a code generator.
             layers = project.mapLayers().values()
             context_info.append(f"Total Layers: {len(layers)}")
 
-            layer_types = {}
+            layer_types = {l_type.name: 0 for l_type in QgsMapLayer.LayerType.values()}
             for layer in layers:
-                layer_type = QgsMapLayer.type(layer).name
-                layer_types[layer_type] = layer_types.get(layer_type, 0) + 1
+                layer_types[layer.type().name] += 1
 
             if layer_types:
-                type_summary = ", ".join([f"{count} {l_type}" for l_type, count in layer_types.items()])
+                type_summary = ", ".join([f"{count} {l_type}" for l_type, count in layer_types.items() if count > 0])
                 context_info.append(f"Layer Types: {type_summary}")
 
             return "\n".join(context_info)

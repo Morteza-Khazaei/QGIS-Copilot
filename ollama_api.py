@@ -4,7 +4,7 @@ Ollama (Local) API Integration for QGIS Copilot
 
 import json
 import requests
-from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal, QThread
 from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
@@ -35,8 +35,150 @@ class OllamaAPI(QObject):
         self.system_prompt = """
 You are QGIS Copilot, an expert PyQGIS developer assistant with comprehensive knowledge of the QGIS PyQGIS Developer Cookbook (https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/index.html).
 
-Follow the same execution environment rules used by the plugin (no `import qgis`, use provided globals like `iface`, `project`, `canvas`, use `QgsProject`, `QgsVectorLayer`, `QVariant`, etc.).
-Always return complete, runnable scripts when modifying prior code.
+You specialize in all areas covered by the PyQGIS Cookbook:
+
+**Core Capabilities:**
+- **Loading Projects and Layers**: QgsProject, QgsVectorLayer, QgsRasterLayer, layer registration
+- **Vector Layers**: Feature iteration, attribute access, spatial indexing, data providers
+- **Raster Layers**: Band access, pixel values, raster statistics, rendering
+- **Map Canvas and GUI**: Canvas manipulation, map tools, custom widgets, actions
+- **Geometry Handling**: QgsGeometry operations, coordinate transformations, spatial relationships
+- **Projections**: CRS handling, coordinate transformations, projection operations
+- **Map Rendering**: Custom renderers, symbols, styling, print layouts
+- **Processing Framework**: Algorithm development, running algorithms, batch processing
+- **Network Analysis**: Network analysis toolkit, shortest paths, routing
+- **QGIS Server**: Server plugins, web services, custom services
+- **Authentication**: Credential management, secure connections
+- **Tasks and Threading**: Background processing, QgsTask, progress indicators
+
+**Code Generation Standards (Following PyQGIS Cookbook):**
+
+**Execution Environment Rules:**
+- **CRITICAL**: Never include `import qgis` or `from qgis import ...` - modules are pre-loaded
+- Standard Python imports (random, math, etc.) are allowed
+- Use global objects: `iface`, `project`, `canvas`
+- Use global classes: `QgsProject`, `QgsVectorLayer`, `QgsRasterLayer`, `QVariant`, etc.
+- For other QGIS classes, use module prefixes: `core.QgsFeature()`, `core.QgsGeometry()`
+
+**PyQGIS Best Practices (Per Cookbook):**
+1. **Layer Creation**: Always use proper URI format for memory layers
+   ```python
+   layer = QgsVectorLayer("Point?crs=EPSG:4326", "layer_name", "memory")
+   ```
+
+2. **Feature Handling**: Use QgsFeature properly with geometry and attributes
+   ```python
+   feature = core.QgsFeature()
+   feature.setGeometry(core.QgsGeometry.fromPointXY(point))
+   feature.setAttributes([value1, value2])
+   ```
+
+3. **Data Provider Operations**: Use dataProvider() for field and feature management
+   ```python
+   provider = layer.dataProvider()
+   provider.addAttributes([core.QgsField("name", QVariant.String)])
+   layer.updateFields()
+   ```
+
+4. **Geometry Operations**: Leverage QgsGeometry methods for spatial operations
+   ```python
+   geom = feature.geometry()
+   buffered = geom.buffer(100, 8)  # 100 units, 8 segments
+   ```
+
+5. **Processing Integration**: Use processing.run() for complex operations
+   ```python
+   result = processing.run("native:buffer", {
+       'INPUT': layer,
+       'DISTANCE': 100,
+       'OUTPUT': 'memory:'
+   })
+   ```
+
+6. **Error Handling**: Always check for valid objects and handle exceptions
+   ```python
+   if layer and layer.isValid():
+       # Perform operations
+   else:
+       print("Layer is not valid")
+   ```
+
+7. **CRS Management**: Handle coordinate reference systems properly
+   ```python
+   crs = core.QgsCoordinateReferenceSystem("EPSG:4326")
+   transform = core.QgsCoordinateTransform(source_crs, dest_crs, project)
+   ```
+
+**Advanced Patterns from Cookbook:**
+
+**Custom Expressions**: Register custom expression functions
+**Map Tools**: Create interactive map tools for user input
+**Symbols and Renderers**: Custom styling and categorized renderers
+**Layout Management**: Programmatic map composition and export
+**Plugin Development**: Hook into QGIS plugin architecture
+**Server Plugins**: Extend QGIS Server functionality
+
+**Field Type Constants (Use These for QgsField):**
+- String fields: `QVariant.String`
+- Integer fields: `QVariant.Int`
+- Double fields: `QVariant.Double`
+- Date fields: `QVariant.Date`
+
+**Common Cookbook Patterns:**
+
+1. **Iterate Features**: 
+   ```python
+   for feature in layer.getFeatures():
+       # Process feature
+   ```
+
+2. **Spatial Selection**:
+   ```python
+   request = core.QgsFeatureRequest().setFilterRect(extent)
+   features = layer.getFeatures(request)
+   ```
+
+3. **Attribute Updates**:
+   ```python
+   with layer.edit():
+       for feature in layer.getFeatures():
+           feature.setAttribute(field_index, new_value)
+           layer.updateFeature(feature)
+   ```
+
+4. **Layer Styling**:
+   ```python
+   symbol = core.QgsMarkerSymbol.createSimple({'color': 'red', 'size': '5'})
+   renderer = core.QgsSingleSymbolRenderer(symbol)
+   layer.setRenderer(renderer)
+   ```
+
+**Proactive Development Approach:**
+- Make reasonable assumptions for ambiguous requests
+- Create memory layers for temporary results
+- Provide working examples that demonstrate cookbook concepts
+- Suggest follow-up actions after successful code execution
+- Always explain the PyQGIS concepts being used
+
+**Iterative Development:**
+- If "Previous Script Content" is provided in the context, your task is to modify or improve that script based on the user's new request.
+- Do not just provide a snippet; provide the complete, updated script that can be executed.
+- For example, if the previous script created a layer, and the user now asks to "change its color to red", you should provide the full script including layer creation and the new styling code.
+
+**Debugging and Refinement:**
+- If "Last Execution Log" is provided, it contains the output or error from the previous script execution.
+- Analyze this log to understand what went wrong or what the output was.
+- Your primary goal is to fix any errors reported in the log or to modify the script based on the output and the user's new request.
+- Provide a complete, corrected, and executable script. Do not just explain the error.
+
+**Safety and Best Practices:**
+- Validate layer existence and validity before operations
+- Use edit sessions for layer modifications
+- Handle coordinate system transformations correctly
+- Provide informative error messages
+- Warn about potentially destructive operations
+
+Remember: You're following the official PyQGIS Developer Cookbook patterns and best practices. Your code should be production-ready and demonstrate proper PyQGIS usage as documented in the official QGIS documentation.
 """
 
     # API-key methods are no-ops to fit existing UI flows
@@ -64,51 +206,89 @@ Always return complete, runnable scripts when modifying prior code.
         Returns a list of model names or raises an exception.
         """
         url = f"{self.base_url.rstrip('/')}/api/tags"
-        resp = requests.get(url, timeout=10)
+        # Keep this snappy so the UI can fail fast if daemon is down
+        resp = requests.get(url, timeout=(3.0, 5.0))
         if resp.status_code != 200:
             raise RuntimeError(f"Ollama tags API error {resp.status_code}: {resp.text}")
         data = resp.json()
         models = [m.get("name") for m in data.get("models", []) if m.get("name")]
         return models
 
-    def send_message(self, message, context=None):
-        """Send a message to local Ollama using /api/generate (non-stream)."""
-        url = f"{self.base_url.rstrip('/')}/api/generate"
+    class _Worker(QThread):
+        """Background worker to call Ollama without blocking UI."""
+        result = pyqtSignal(str)
+        failed = pyqtSignal(str)
 
+        def __init__(self, base_url, payload, timeout_connect=5.0, timeout_read=120.0):
+            super().__init__()
+            self.base_url = base_url.rstrip('/')
+            self.payload = payload
+            self.timeout = (timeout_connect, timeout_read)
+
+        def run(self):
+            try:
+                url = f"{self.base_url}/api/chat"
+                resp = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json=self.payload,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Parse both chat and generate response formats
+                    message = data.get("message", {}) if isinstance(data.get("message"), dict) else {}
+                    content = message.get("content") if message else None
+                    if not content:
+                        content = data.get("response")
+                    if content:
+                        self.result.emit(content.strip())
+                    else:
+                        self.failed.emit("No response generated by Ollama.")
+                else:
+                    # Provide friendlier messages for common issues
+                    txt = resp.text
+                    if resp.status_code == 404 and 'model' in txt.lower():
+                        self.failed.emit("Model not found on Ollama. Pull it with 'ollama run <model>' or select another model.")
+                    else:
+                        self.failed.emit(f"API Error {resp.status_code}: {txt}")
+            except requests.exceptions.ConnectTimeout:
+                self.failed.emit("Connection to Ollama timed out. Is the daemon running at the configured Base URL?")
+            except requests.exceptions.ReadTimeout:
+                self.failed.emit("Ollama took too long to respond. Try a smaller model or reduce num_predict.")
+            except Exception as e:
+                self.failed.emit(f"Request to Ollama failed: {str(e)}")
+
+    def send_message(self, message, context=None):
+        """Send a message to local Ollama using a background thread."""
         user_content = message
         if context:
             user_content = f"Current QGIS Context:\n{context}\n\nUser Question: {message}"
 
+        # Use the /api/chat format, which is more standard for conversational models.
         payload = {
             "model": self.model,
-            "prompt": user_content,
-            "system": self.system_prompt,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_content},
+            ],
             "stream": False,
+            "options": {
+                # Reasonable defaults; users can adjust via model selection or prompt
+                "num_predict": 512,
+                "temperature": 0.2,
+                "top_p": 0.95,
+            },
         }
 
-        try:
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=60,
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                content = data.get("response") or ""
-                if content:
-                    self.response_received.emit(content.strip())
-                else:
-                    self.error_occurred.emit("No response generated by Ollama.")
-            else:
-                error_msg = f"API Error {response.status_code}: {response.text}"
-                self.error_occurred.emit(error_msg)
-                QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
-        except Exception as e:
-            error_msg = f"Request to Ollama failed: {str(e)}"
-            self.error_occurred.emit(error_msg)
-            QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
+        # Launch in a worker to avoid blocking the UI thread
+        worker = OllamaAPI._Worker(self.base_url, payload, timeout_connect=5.0, timeout_read=180.0)
+        # Ensure worker object survives until finished by attaching to self
+        self._current_worker = worker
+        worker.result.connect(self.response_received.emit)
+        worker.failed.connect(self.error_occurred.emit)
+        worker.finished.connect(lambda: setattr(self, "_current_worker", None))
+        worker.start()
 
     def get_qgis_context(self, iface):
         """Extract current QGIS context information (same shape as other providers)."""
@@ -157,3 +337,36 @@ Always return complete, runnable scripts when modifying prior code.
         except Exception as e:
             QgsMessageLog.logMessage(f"Error getting context: {str(e)}", "QGIS Copilot", level=Qgis.Warning)
             return "Context information unavailable"
+
+    def test_model(self, on_result=None, on_error=None, prompt: str = None):
+        """Quickly test the currently selected Ollama model.
+
+        Runs a small non-blocking generation to verify that the daemon and model
+        are responsive. Calls the provided callbacks in the GUI thread.
+        """
+        test_prompt = prompt or "Reply with a short OK."
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": test_prompt},
+            ],
+            "stream": False,
+            "options": {
+                "num_predict": 32,
+                "temperature": 0.1,
+            },
+        }
+        worker = OllamaAPI._Worker(self.base_url, payload, timeout_connect=5.0, timeout_read=30.0)
+        self._current_worker = worker
+
+        if on_result:
+            worker.result.connect(on_result)
+        else:
+            worker.result.connect(self.response_received.emit)
+        if on_error:
+            worker.failed.connect(on_error)
+        else:
+            worker.failed.connect(self.error_occurred.emit)
+        worker.finished.connect(lambda: setattr(self, "_current_worker", None))
+        worker.start()

@@ -39,13 +39,15 @@ class CopilotChatDialog(QDialog):
         self.openai_api = OpenAIAPI()
         self.claude_api = ClaudeAPI()
         self.ollama_api = OllamaAPI()
+        # Order providers with Ollama first so it's the default in the UI
         self.api_handlers = {
+            "Ollama (Local)": self.ollama_api,
             "Google Gemini": self.gemini_api,
             "OpenAI ChatGPT": self.openai_api,
             "Anthropic Claude": self.claude_api,
-            "Ollama (Local)": self.ollama_api,
         }
-        self.default_system_prompt = self.gemini_api.system_prompt
+        # Default to Ollama's prompt unless a custom prompt is saved
+        self.default_system_prompt = self.ollama_api.system_prompt
 
         # Enable minimize/maximize buttons on the dialog
         try:
@@ -55,9 +57,25 @@ class CopilotChatDialog(QDialog):
 
         self.setup_ui()
 
-        # Set default API based on UI
+        # Select saved provider or default to Ollama (Local)
+        try:
+            settings = QSettings()
+            saved_provider = settings.value("qgis_copilot/provider", "Ollama (Local)")
+            if saved_provider in self.api_handlers:
+                self.api_provider_combo.setCurrentText(saved_provider)
+            else:
+                self.api_provider_combo.setCurrentText("Ollama (Local)")
+        except Exception:
+            # Fall back silently if settings are unavailable
+            self.api_provider_combo.setCurrentText("Ollama (Local)")
+
+        # Set current API and update related UI
         self.current_api_name = self.api_provider_combo.currentText()
         self.current_api = self.api_handlers[self.current_api_name]
+        try:
+            self.update_api_settings_ui()
+        except Exception:
+            pass
 
         # Initialize enhanced executor
         self.pyqgis_executor = EnhancedPyQGISExecutor(iface)
@@ -404,6 +422,14 @@ class CopilotChatDialog(QDialog):
         model_info_label.setWordWrap(True)
         model_layout.addWidget(model_info_label)
 
+        # Test selected model (primarily for Ollama)
+        test_row = QHBoxLayout()
+        self.test_model_button = QPushButton("Test Selected Model")
+        self.test_model_button.clicked.connect(self.on_test_ollama_model)
+        test_row.addWidget(self.test_model_button)
+        test_row.addStretch()
+        model_layout.addLayout(test_row)
+
         model_group.setLayout(model_layout)
         layout.addWidget(model_group)
 
@@ -414,6 +440,20 @@ class CopilotChatDialog(QDialog):
         prompt_info_label = QLabel("This is the core instruction set for the AI agent. Edit with caution.")
         prompt_info_label.setWordWrap(True)
         prompt_layout.addWidget(prompt_info_label)
+
+        # Prompt file controls
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("Prompt File (Markdown):"))
+        self.system_prompt_file_input = QLineEdit()
+        self.system_prompt_file_input.setReadOnly(True)
+        file_row.addWidget(self.system_prompt_file_input)
+        browse_prompt_btn = QPushButton("Change…")
+        browse_prompt_btn.clicked.connect(self.browse_system_prompt_file)
+        open_prompt_btn = QPushButton("Open File")
+        open_prompt_btn.clicked.connect(self.open_system_prompt_file)
+        file_row.addWidget(browse_prompt_btn)
+        file_row.addWidget(open_prompt_btn)
+        prompt_layout.addLayout(file_row)
 
         # Prompt editor: single scrollbar inside the editor, buttons remain outside
         self.system_prompt_input = QTextEdit()
@@ -486,6 +526,11 @@ class CopilotChatDialog(QDialog):
         """Handle API provider change"""
         self.current_api_name = provider_name
         self.current_api = self.api_handlers[provider_name]
+        # Persist user's provider choice
+        try:
+            QSettings().setValue("qgis_copilot/provider", provider_name)
+        except Exception:
+            pass
         self.update_api_settings_ui()
         self.load_current_api_key()
 
@@ -542,6 +587,11 @@ class CopilotChatDialog(QDialog):
             self.model_selection_combo.setVisible(len(models) > 1)
 
         self.model_selection_combo.blockSignals(False)
+        # Show model test only for Ollama
+        try:
+            self.test_model_button.setVisible(is_local)
+        except Exception:
+            pass
         
         if provider_name == "Google Gemini":
             self.instructions_label.setText("""
@@ -611,6 +661,48 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception as e:
             QMessageBox.critical(self, "Ollama Models", f"Failed to load models: {e}")
 
+    def on_test_ollama_model(self):
+        """Test the currently selected Ollama model and show results in Live Logs."""
+        try:
+            self.add_to_execution_results("=== Ollama Model Test ===")
+            try:
+                self.add_to_execution_results(f"Base URL: {self.ollama_api.get_base_url()}")
+            except Exception:
+                pass
+            try:
+                self.add_to_execution_results(f"Model: {self.ollama_api.model}")
+            except Exception:
+                pass
+
+            def _ok(text: str):
+                try:
+                    self.add_to_execution_results("Test OK — model responded.")
+                    self.add_to_execution_results(text)
+                except Exception:
+                    pass
+                try:
+                    QMessageBox.information(self, "Ollama Test", "Model responded successfully.")
+                except Exception:
+                    pass
+
+            def _err(err: str):
+                try:
+                    self.add_to_execution_results("Test Failed — see error below:")
+                    self.add_to_execution_results(str(err))
+                except Exception:
+                    pass
+                try:
+                    QMessageBox.critical(self, "Ollama Test", str(err))
+                except Exception:
+                    pass
+
+            self.ollama_api.test_model(on_result=_ok, on_error=_err)
+        except Exception as e:
+            try:
+                QMessageBox.critical(self, "Ollama Test", f"Failed to start test: {e}")
+            except Exception:
+                pass
+
     def load_current_api_key(self):
         """Load saved API key for the current provider"""
         api_key = self.current_api.get_api_key()
@@ -665,18 +757,59 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             else:
                 context = log_context
 
-        # Show progress
-        self.show_progress(f"Getting response from {self.current_api_name}...")
+        # Log provider and key config details before sending
+        try:
+            self.log_provider_and_config()
+        except Exception:
+            pass
+
+        # For Ollama, don't show a blocking progress bar; others keep it
+        if self.current_api_name != "Ollama (Local)":
+            self.show_progress(f"Getting response from {self.current_api_name}...")
 
         # Send to API
         self.current_api.send_message(message, context)
     
     def load_system_prompt(self):
-        """Load the system prompt from settings or use default."""
+        """Load the system prompt from a Markdown file (preferred) or settings.
+
+        If no file exists yet, create one with the default prompt.
+        """
         settings = QSettings()
-        saved_prompt = settings.value("qgis_copilot/system_prompt", self.default_system_prompt)
-        self.system_prompt_input.setText(saved_prompt)
-        self.update_all_system_prompts(saved_prompt)
+        # Determine prompt file path
+        path = settings.value("qgis_copilot/system_prompt_file", type=str)
+        if not path:
+            plugin_root = os.path.dirname(__file__)
+            path = os.path.join(plugin_root, "system_prompt.md")
+            settings.setValue("qgis_copilot/system_prompt_file", path)
+
+        # Ensure the file exists; if not, seed from any saved setting or default
+        prompt_text = None
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    prompt_text = f.read()
+            except Exception:
+                prompt_text = None
+
+        if prompt_text is None:
+            # Fall back to previously saved setting, then default
+            prompt_text = settings.value("qgis_copilot/system_prompt", self.default_system_prompt)
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(prompt_text or "")
+            except Exception:
+                # If writing fails, continue with in-memory prompt
+                pass
+
+        # Reflect file path in UI and update editor + handlers
+        try:
+            self.system_prompt_file_input.setText(path)
+        except Exception:
+            pass
+        self.system_prompt_input.setText(prompt_text)
+        self.update_all_system_prompts(prompt_text)
 
     def load_preferences(self):
         """Load chat/execution preferences from QSettings and apply defaults."""
@@ -706,12 +839,26 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.workspace_dir_input.setText(ws)
 
     def save_system_prompt(self):
-        """Save the custom system prompt to settings."""
+        """Save the custom system prompt to the Markdown file and settings."""
         prompt_text = self.system_prompt_input.toPlainText()
         settings = QSettings()
+        # Always persist to settings for backward compatibility
         settings.setValue("qgis_copilot/system_prompt", prompt_text)
+        # Write to file
+        path = settings.value("qgis_copilot/system_prompt_file", type=str)
+        if not path:
+            plugin_root = os.path.dirname(__file__)
+            path = os.path.join(plugin_root, "system_prompt.md")
+            settings.setValue("qgis_copilot/system_prompt_file", path)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(prompt_text)
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Failed to write prompt file: {e}")
+        # Update all handlers
         self.update_all_system_prompts(prompt_text)
-        QMessageBox.information(self, "Success", "System prompt saved successfully!")
+        QMessageBox.information(self, "Success", "System prompt saved to Markdown file.")
 
     def save_workspace_dir(self):
         """Persist the workspace directory to settings and ensure it exists."""
@@ -751,16 +898,109 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             return
 
         self.system_prompt_input.setText(self.default_system_prompt)
-        
         settings = QSettings()
         settings.setValue("qgis_copilot/system_prompt", self.default_system_prompt)
+        # Overwrite the file with the default prompt too
+        path = settings.value("qgis_copilot/system_prompt_file", type=str)
+        if path:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.default_system_prompt)
+            except Exception:
+                pass
         self.update_all_system_prompts(self.default_system_prompt)
-        QMessageBox.information(self, "Success", "System prompt has been reset to default.")
+        QMessageBox.information(self, "Success", "System prompt has been reset and saved to file.")
 
     def update_all_system_prompts(self, prompt_text):
         """Update the system prompt for all API handlers."""
         for handler in self.api_handlers.values():
             handler.system_prompt = prompt_text
+
+    def log_provider_and_config(self):
+        """Write a one-shot snapshot of provider and key configuration to Live Logs."""
+        try:
+            self.add_to_execution_results("=== QGIS Copilot Request ===")
+            self.add_to_execution_results(f"Provider: {self.current_api_name}")
+            # Model if available
+            try:
+                model = getattr(self.current_api, 'model', None)
+                if model:
+                    self.add_to_execution_results(f"Model: {model}")
+            except Exception:
+                pass
+            # Provider-specific endpoint
+            try:
+                if self.current_api_name == "Ollama (Local)" and hasattr(self.ollama_api, 'get_base_url'):
+                    self.add_to_execution_results(f"Base URL: {self.ollama_api.get_base_url()}")
+            except Exception:
+                pass
+
+            # Prompt source
+            try:
+                prompt_file = QSettings().value("qgis_copilot/system_prompt_file", type=str)
+                if prompt_file:
+                    self.add_to_execution_results(f"Prompt File: {prompt_file}")
+            except Exception:
+                pass
+
+            # Preferences
+            try:
+                prefs = []
+                prefs.append(f"Include Context: {self.include_context_cb.isChecked()}")
+                prefs.append(f"Include Logs: {self.include_logs_cb.isChecked()}")
+                prefs.append(f"Auto Execute: {self.auto_execute_cb.isChecked()}")
+                prefs.append(f"Auto Feedback: {self.auto_feedback_cb.isChecked()}")
+                prefs.append(f"Run in Console: {self.run_in_console_cb.isChecked()}")
+                self.add_to_execution_results("Preferences: " + ", ".join(prefs))
+            except Exception:
+                pass
+
+            # Workspace directory
+            try:
+                ws = QSettings().value("qgis_copilot/workspace_dir", type=str)
+                if not ws:
+                    plugin_root = os.path.dirname(__file__)
+                    ws = os.path.join(plugin_root, "workspace")
+                self.add_to_execution_results(f"Workspace: {ws}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---- Prompt file helpers ----
+    def browse_system_prompt_file(self):
+        """Let the user choose a different Markdown file for the system prompt."""
+        try:
+            current = self.system_prompt_file_input.text().strip()
+        except Exception:
+            current = ""
+        from qgis.PyQt.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Select System Prompt Markdown", current or os.path.expanduser("~"), "Markdown Files (*.md);;Text Files (*.txt);;All Files (*)")
+        if not path:
+            return
+        settings = QSettings()
+        settings.setValue("qgis_copilot/system_prompt_file", path)
+        try:
+            self.system_prompt_file_input.setText(path)
+        except Exception:
+            pass
+        # Reload content from the new file
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.system_prompt_input.setText(text)
+            self.update_all_system_prompts(text)
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Failed to load prompt file: {e}")
+
+    def open_system_prompt_file(self):
+        """Open the current prompt file in the system editor."""
+        path = QSettings().value("qgis_copilot/system_prompt_file", type=str)
+        if not path:
+            QMessageBox.information(self, "Info", "No prompt file is configured.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def handle_api_response(self, response):
         """Handle response from the current API"""
@@ -773,6 +1013,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.last_response = response
         self.execute_button.setEnabled(True)
         
+        # Mirror all provider outputs to the Live Logs panel for transparency
+        try:
+            self.add_to_execution_results(f"=== {self.current_api_name} Response ===")
+            self.add_to_execution_results(response)
+        except Exception:
+            pass
+
         # Auto-execute if enabled
         if self.auto_execute_cb.isChecked():
             self.execute_code_from_response(response)
@@ -867,6 +1114,12 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         final_error_message = user_friendly_error if user_friendly_error else error
         self.add_to_chat("System", f"Error from {self.current_api_name}: {final_error_message}", "#dc3545")
         QgsMessageLog.logMessage(f"QGIS Copilot API Error ({self.current_api_name}): {error}", "QGIS Copilot", level=Qgis.Critical)
+        # Also reflect errors in the Live Logs panel
+        try:
+            self.add_to_execution_results(f"=== {self.current_api_name} Error ===")
+            self.add_to_execution_results(str(final_error_message))
+        except Exception:
+            pass
     
     def execute_last_code(self):
         """Execute code from the last response"""

@@ -104,6 +104,10 @@ Always return complete, runnable scripts when modifying prior code.
             else:
                 error_msg = f"API Error {response.status_code}: {response.text}"
                 self.error_occurred.emit(error_msg)
+                QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
+        except Exception as e:
+            error_msg = f"Request to Ollama failed: {str(e)}"
+            self.error_occurred.emit(error_msg)
             QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
 
     def get_qgis_context(self, iface):
@@ -153,8 +157,3 @@ Always return complete, runnable scripts when modifying prior code.
         except Exception as e:
             QgsMessageLog.logMessage(f"Error getting context: {str(e)}", "QGIS Copilot", level=Qgis.Warning)
             return "Context information unavailable"
-
-        except Exception as e:
-            error_msg = f"Request to Ollama failed: {str(e)}"
-            self.error_occurred.emit(error_msg)
-            QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)

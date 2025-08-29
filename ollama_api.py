@@ -247,6 +247,15 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
                     if content and isinstance(content, str) and content.strip():
                         self.result.emit(content.strip())
                     else:
+                        try:
+                            # Log raw response for debugging
+                            QgsMessageLog.logMessage(
+                                f"Ollama returned empty content. Raw keys: {list(data.keys())}",
+                                "QGIS Copilot",
+                                level=Qgis.Warning,
+                            )
+                        except Exception:
+                            pass
                         # Fallback: if chat returned empty, try generate once
                         if is_chat:
                             try:
@@ -300,20 +309,13 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         if context:
             user_content = f"Current QGIS Context:\n{context}\n\nUser Question: {message}"
 
-        # Use the /api/chat format, which is more standard for conversational models.
+        # Send exactly like the working curl example: chat with a single user message
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": user_content}
             ],
             "stream": False,
-            "options": {
-                # Reasonable defaults; users can adjust via model selection or prompt
-                "num_predict": 512,
-                "temperature": 0.2,
-                "top_p": 0.95,
-            },
         }
 
         # Launch in a worker to avoid blocking the UI thread
@@ -379,16 +381,13 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         Runs a small non-blocking generation to verify that the daemon and model
         are responsive. Calls the provided callbacks in the GUI thread.
         """
-        test_prompt = prompt or "Reply with a short OK."
+        test_prompt = prompt or "Connection test successful!"
         payload = {
             "model": self.model,
-            "prompt": test_prompt,
-            "system": self.system_prompt,
+            "messages": [
+                {"role": "user", "content": test_prompt}
+            ],
             "stream": False,
-            "options": {
-                "num_predict": 32,
-                "temperature": 0.1,
-            },
         }
         worker = OllamaAPI._Worker(self.base_url, payload, timeout_connect=5.0, timeout_read=30.0)
         self._current_worker = worker

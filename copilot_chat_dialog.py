@@ -511,6 +511,8 @@ class CopilotChatDialog(QDialog):
         self.openai_api.error_occurred.connect(self.handle_api_error)
         self.claude_api.response_received.connect(self.handle_api_response)
         self.claude_api.error_occurred.connect(self.handle_api_error)
+        self.ollama_api.response_received.connect(self.handle_api_response)
+        self.ollama_api.error_occurred.connect(self.handle_api_error)
         
         # Executor signals
         self.pyqgis_executor.execution_completed.connect(self.handle_execution_completed)
@@ -584,7 +586,11 @@ class CopilotChatDialog(QDialog):
             if hasattr(self.current_api, 'model'):
                 # Select current model if present
                 self.model_selection_combo.setCurrentText(self.current_api.model)
-            self.model_selection_combo.setVisible(len(models) > 1)
+            # Always show the model list for Ollama; for others, hide if only one
+            if is_local:
+                self.model_selection_combo.setVisible(True)
+            else:
+                self.model_selection_combo.setVisible(len(models) > 1)
 
         self.model_selection_combo.blockSignals(False)
         # Show model test only for Ollama
@@ -666,7 +672,6 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     )
                     if ok:
                         self.add_to_execution_results("Chat test OK.")
-                        self.add_to_execution_results(msg)
                         QMessageBox.information(self, "Ollama Diagnostic", f"Connected. {count} model(s). Chat OK with '{test_model}'.")
                     else:
                         self.add_to_execution_results("Chat test FAILED.")
@@ -714,7 +719,6 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             def _ok(text: str):
                 try:
                     self.add_to_execution_results("Test OK — model responded.")
-                    self.add_to_execution_results(text)
                 except Exception:
                     pass
                 try:
@@ -1050,12 +1054,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.last_response = response
         self.execute_button.setEnabled(True)
         
-        # Mirror all provider outputs to the Live Logs panel for transparency
-        try:
-            self.add_to_execution_results(f"=== {self.current_api_name} Response ===")
-            self.add_to_execution_results(response)
-        except Exception:
-            pass
+        # Do not mirror API responses to the Live Logs panel
 
         # Auto-execute if enabled
         if self.auto_execute_cb.isChecked():
@@ -1151,12 +1150,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         final_error_message = user_friendly_error if user_friendly_error else error
         self.add_to_chat("System", f"Error from {self.current_api_name}: {final_error_message}", "#dc3545")
         QgsMessageLog.logMessage(f"QGIS Copilot API Error ({self.current_api_name}): {error}", "QGIS Copilot", level=Qgis.Critical)
-        # Also reflect errors in the Live Logs panel
-        try:
-            self.add_to_execution_results(f"=== {self.current_api_name} Error ===")
-            self.add_to_execution_results(str(final_error_message))
-        except Exception:
-            pass
+        # Do not mirror API errors to the Live Logs panel
     
     def execute_last_code(self):
         """Execute code from the last response"""

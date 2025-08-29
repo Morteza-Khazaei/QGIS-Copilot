@@ -18,6 +18,7 @@ from qgis.core import QgsMessageLog, Qgis
 
 from .gemini_api import GeminiAPI
 from .openai_api import OpenAIAPI
+from .claude_api import ClaudeAPI
 from .pyqgis_executor import PyQGISExecutor
 
 
@@ -33,9 +34,11 @@ class CopilotChatDialog(QDialog):
         # Initialize API handlers
         self.gemini_api = GeminiAPI()
         self.openai_api = OpenAIAPI()
+        self.claude_api = ClaudeAPI()
         self.api_handlers = {
             "Google Gemini": self.gemini_api,
-            "OpenAI ChatGPT": self.openai_api
+            "OpenAI ChatGPT": self.openai_api,
+            "Anthropic Claude": self.claude_api
         }
 
         self.setup_ui()
@@ -269,6 +272,8 @@ class CopilotChatDialog(QDialog):
         self.gemini_api.error_occurred.connect(self.handle_api_error)
         self.openai_api.response_received.connect(self.handle_api_response)
         self.openai_api.error_occurred.connect(self.handle_api_error)
+        self.claude_api.response_received.connect(self.handle_api_response)
+        self.claude_api.error_occurred.connect(self.handle_api_error)
         
         # Executor signals
         self.pyqgis_executor.execution_completed.connect(self.handle_execution_result)
@@ -325,6 +330,15 @@ To use ChatGPT, you need an OpenAI API key:<br>
 2. Sign in and create a new secret key.<br>
 3. Enter it above and click 'Save API Key'.<br><br>
 <i>Note: OpenAI API usage may incur costs.</i>
+            """)
+        elif provider_name == "Anthropic Claude":
+            self.instructions_label.setText("""
+<b>Using Anthropic's Claude</b><br><br>
+To use Claude, you need an Anthropic API key:<br>
+1. Visit <a href="https://console.anthropic.com/keys">Anthropic Console</a>.<br>
+2. Sign in and create a new API key.<br>
+3. Enter it above and click 'Save API Key'.<br><br>
+<i>Note: Anthropic API usage may incur costs.</i>
             """)
 
     def load_current_api_key(self):
@@ -417,6 +431,8 @@ To use ChatGPT, you need an OpenAI API key:<br>
             except (json.JSONDecodeError, IndexError):
                 # Not a parsable JSON error, fall back to default
                 pass
+        elif self.current_api_name == "Anthropic Claude":
+            pass  # Can add specific Claude error parsing here in the future
         
         final_error_message = user_friendly_error if user_friendly_error else error
         self.add_to_chat("System", f"Error from {self.current_api_name}: {final_error_message}", "#dc3545")
@@ -482,10 +498,14 @@ To use ChatGPT, you need an OpenAI API key:<br>
             QMessageBox.information(self, "Info", "Chat history is empty. Nothing to save.")
             return
 
+        # Generate a default filename with a timestamp
+        timestamp = datetime.now().strftime("%b %d, %Y, %I_%M_%S %p")
+        default_filename = f"QGIS Copilot Chat {timestamp}"
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Chat History",
-            "",
+            default_filename,
             "JSON Files (*.json);;All Files (*)"
         )
 

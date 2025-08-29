@@ -1,0 +1,18 @@
+[general]
+name=QGIS Copilot
+qgisMinimumVersion=3.0
+description=Your intelligent QGIS assistant powered by Google Gemini AI
+version=1.0.0
+author=QGIS Community
+email=community@qgis.org
+about=QGIS Copilot is an intelligent assistant that helps you work with QGIS through natural language. Ask questions, get code solutions, and execute GIS operations effortlessly using the power of Google Gemini AI and PyQGIS API. Perfect for both beginners learning QGIS and experts who want to speed up their workflow.
+tracker=https://github.com/yourusername/qgis-copilot/issues
+repository=https://github.com/yourusername/qgis-copilot
+tags=python,ai,gemini,pyqgis,assistant,copilot,chat,nlp,gis,automation
+homepage=https://github.com/yourusername/qgis-copilot
+category=Plugins
+icon=icon.png
+experimental=False
+deprecated=False
+server=False
+hasProcessingProvider=no

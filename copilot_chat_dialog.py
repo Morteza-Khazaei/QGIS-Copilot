@@ -640,12 +640,49 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             QMessageBox.critical(self, "Error", f"Failed to save base URL: {e}")
 
     def on_check_ollama_connection(self):
+        # Run a richer diagnostic, echoing to Live Logs
         try:
-            models = self.ollama_api.list_models()
-            count = len(models)
-            QMessageBox.information(self, "Ollama Connection", f"Connected. {count} model(s) available.")
+            self.add_to_execution_results("=== Ollama Diagnostic ===")
+            try:
+                self.add_to_execution_results(f"Base URL: {self.ollama_api.get_base_url()}")
+            except Exception:
+                pass
+
+            # Step 1: List models
+            try:
+                models = self.ollama_api.list_models()
+                count = len(models)
+                self.add_to_execution_results(f"Models available: {count}")
+                if models:
+                    preview = ", ".join(models[:5])
+                    self.add_to_execution_results(f"First models: {preview}")
+                    # Step 2: Chat test with selected/first model
+                    test_model = self.ollama_api.model if self.ollama_api.model in models else models[0]
+                    self.add_to_execution_results(f"Testing chat with: {test_model}")
+                    ok, msg = self.ollama_api.chat_once(
+                        "Hello, please respond with 'Connection test successful!'",
+                        model=test_model,
+                        timeout=20,
+                    )
+                    if ok:
+                        self.add_to_execution_results("Chat test OK.")
+                        self.add_to_execution_results(msg)
+                        QMessageBox.information(self, "Ollama Diagnostic", f"Connected. {count} model(s). Chat OK with '{test_model}'.")
+                    else:
+                        self.add_to_execution_results("Chat test FAILED.")
+                        self.add_to_execution_results(msg)
+                        QMessageBox.warning(self, "Ollama Diagnostic", f"Connected. {count} model(s). Chat failed: {msg}")
+                else:
+                    self.add_to_execution_results("No models found. Pull a model, e.g., 'ollama pull llama3.1:8b'")
+                    QMessageBox.warning(self, "Ollama Diagnostic", "Connected but no models found. Pull a model first.")
+            except Exception as e:
+                self.add_to_execution_results(f"List models failed: {e}")
+                QMessageBox.critical(self, "Ollama Diagnostic", f"Connection failed: {e}")
         except Exception as e:
-            QMessageBox.critical(self, "Ollama Connection", f"Connection failed: {e}")
+            try:
+                QMessageBox.critical(self, "Ollama Diagnostic", f"Unexpected error: {e}")
+            except Exception:
+                pass
 
     def on_refresh_ollama_models(self):
         try:

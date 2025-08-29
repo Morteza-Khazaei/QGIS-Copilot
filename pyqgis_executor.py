@@ -1,12 +1,15 @@
 """
-PyQGIS Code Executor - Safely execute PyQGIS code from QGIS Copilot responses
+Enhanced PyQGIS Code Executor - Safely execute PyQGIS code with detailed logging
+and feedback loop for AI improvements
 """
 
 import re
 import sys
 import traceback
+import time
 from io import StringIO
 from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime
 
 from qgis.core import (
     QgsProject, QgsApplication, QgsMessageLog, Qgis,
@@ -16,14 +19,55 @@ from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant
 
 
-class PyQGISExecutor(QObject):
-    """Execute PyQGIS code safely with proper context"""
+class ExecutionLog:
+    """Class to store execution details"""
+    def __init__(self, code, success, output, error_msg=None, execution_time=0):
+        self.timestamp = datetime.now()
+        self.code = code
+        self.success = success
+        self.output = output
+        self.error_msg = error_msg
+        self.execution_time = execution_time
     
-    execution_completed = pyqtSignal(str, bool)  # result, success
+    def to_dict(self):
+        return {
+            'timestamp': self.timestamp.isoformat(),
+            'code': self.code,
+            'success': self.success,
+            'output': self.output,
+            'error_msg': self.error_msg,
+            'execution_time': self.execution_time
+        }
+    
+    def get_formatted_log(self):
+        """Get a formatted log entry for display"""
+        status = "✅ SUCCESS" if self.success else "❌ ERROR"
+        time_str = self.timestamp.strftime("%H:%M:%S")
+        
+        log = f"[{time_str}] {status} (execution time: {self.execution_time:.3f}s)\n"
+        
+        if self.output:
+            log += f"OUTPUT:\n{self.output}\n"
+        
+        if not self.success and self.error_msg:
+            log += f"ERROR:\n{self.error_msg}\n"
+        
+        log += "-" * 50 + "\n"
+        return log
+
+
+class EnhancedPyQGISExecutor(QObject):
+    """Enhanced executor with detailed logging and AI feedback capabilities"""
+    
+    execution_completed = pyqtSignal(str, bool, object)  # result, success, execution_log
+    logs_updated = pyqtSignal(str)  # formatted log string
+    improvement_suggested = pyqtSignal(str, str)  # original_code, suggested_improvement
     
     def __init__(self, iface):
         super().__init__()
         self.iface = iface
+        self.execution_history = []  # Store ExecutionLog objects
+        self.max_history = 50  # Keep last 50 executions
         self.setup_execution_environment()
     
     def setup_execution_environment(self):
@@ -106,10 +150,7 @@ class PyQGISExecutor(QObject):
     def is_safe_code(self, code):
         """Check if code is safe to execute"""
         # List of potentially dangerous operations
-        # (pattern, message)
         disallowed_patterns = [
-            (r'import\s+qgis', "Do not import 'qgis' modules; they are pre-loaded."),
-            (r'from\s+qgis', "Do not import from 'qgis' modules; they are pre-loaded."),
             (r'import\s+os', "Importing 'os' is not allowed for security reasons."),
             (r'import\s+subprocess', "Importing 'subprocess' is not allowed for security reasons."),
             (r'import\s+sys', "Importing 'sys' is not allowed. Use the provided environment."),
@@ -143,13 +184,50 @@ class PyQGISExecutor(QObject):
         return True, "Code appears safe"
     
     def execute_code(self, code):
-        """Execute PyQGIS code safely"""
+        """Execute PyQGIS code safely with detailed logging"""
+        # Pre-process code to remove redundant/incorrect QGIS imports that the AI might add.
+        # The execution environment provides all necessary QGIS modules and classes globally,
+        # so these imports are unnecessary and can sometimes be incorrect (e.g., from qgis.core import QVariant).
+        lines = code.split('\n')
+        cleaned_lines = []
+        in_qgis_import_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('from qgis.') and 'import' in stripped:
+                if stripped.endswith('('):
+                    in_qgis_import_block = True
+                # This is a qgis import line, skip it
+                continue
+            
+            if in_qgis_import_block:
+                if ')' in stripped:
+                    in_qgis_import_block = False
+                # This is inside a qgis import block, skip it
+                continue
+
+            if stripped == 'import qgis':
+                continue
+            
+            cleaned_lines.append(line)
+        code = '\n'.join(cleaned_lines)
+
+        start_time = time.time()
+        
         # Check if code is safe
         is_safe, safety_msg = self.is_safe_code(code)
         if not is_safe:
+            execution_log = ExecutionLog(
+                code=code,
+                success=False,
+                output="",
+                error_msg=f"Execution blocked. {safety_msg}",
+                execution_time=0
+            )
+            self.add_to_history(execution_log)
             self.execution_completed.emit(
                 f"Execution blocked. {safety_msg}",
-                False
+                False,
+                execution_log
             )
             return
         
@@ -171,37 +249,167 @@ class PyQGISExecutor(QObject):
             stdout_output = stdout_capture.getvalue()
             stderr_output = stderr_capture.getvalue()
             
+            execution_time = time.time() - start_time
+            
             # Prepare result message
             result = "Code executed successfully.\n"
+            output_text = ""
+            
             if stdout_output:
                 result += f"Output:\n{stdout_output}\n"
+                output_text += stdout_output
             if stderr_output:
                 result += f"Warnings/Errors:\n{stderr_output}\n"
+                output_text += f"\nWarnings: {stderr_output}" if stdout_output else stderr_output
+            
+            # Create execution log
+            execution_log = ExecutionLog(
+                code=code,
+                success=True,
+                output=output_text,
+                execution_time=execution_time
+            )
+            
+            self.add_to_history(execution_log)
             
             # Refresh map canvas if available
             if self.iface:
                 self.iface.mapCanvas().refresh()
             
-            self.execution_completed.emit(result, True)
+            self.execution_completed.emit(result, True, execution_log)
             
         except Exception as e:
+            execution_time = time.time() - start_time
             error_msg = f"Execution error: {str(e)}\n"
             error_msg += f"Traceback:\n{traceback.format_exc()}"
-            self.execution_completed.emit(error_msg, False)
+            
+            # Create execution log
+            execution_log = ExecutionLog(
+                code=code,
+                success=False,
+                output="",
+                error_msg=error_msg,
+                execution_time=execution_time
+            )
+            
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(error_msg, False, execution_log)
             
         finally:
             # Restore stdout and stderr
             sys.stdout = old_stdout
             sys.stderr = old_stderr
     
+    def add_to_history(self, execution_log):
+        """Add execution log to history and emit update signal"""
+        self.execution_history.append(execution_log)
+        
+        # Keep only recent history
+        if len(self.execution_history) > self.max_history:
+            self.execution_history = self.execution_history[-self.max_history:]
+        
+        # Emit log update
+        self.logs_updated.emit(execution_log.get_formatted_log())
+    
+    def get_execution_context_for_ai(self, last_n_executions=3):
+        """Get execution context to send back to AI for improvements"""
+        if not self.execution_history:
+            return "No previous execution history available."
+        
+        recent_logs = self.execution_history[-last_n_executions:]
+        context = "RECENT EXECUTION HISTORY:\n"
+        context += "=" * 50 + "\n"
+        
+        for i, log in enumerate(recent_logs, 1):
+            context += f"EXECUTION #{i}:\n"
+            context += f"Timestamp: {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            context += f"Success: {'Yes' if log.success else 'No'}\n"
+            context += f"Execution Time: {log.execution_time:.3f}s\n"
+            context += f"Code:\n{log.code}\n"
+            
+            if log.output:
+                context += f"Output:\n{log.output}\n"
+            
+            if not log.success and log.error_msg:
+                context += f"Error Details:\n{log.error_msg}\n"
+            
+            context += "-" * 30 + "\n"
+        
+        # Add analysis of common issues
+        failed_executions = [log for log in recent_logs if not log.success]
+        if failed_executions:
+            context += "\nCOMMON ISSUES DETECTED:\n"
+            error_patterns = {}
+            for log in failed_executions:
+                if log.error_msg:
+                    # Extract error type
+                    error_lines = log.error_msg.split('\n')
+                    for line in error_lines:
+                        if 'Error:' in line or 'Exception:' in line:
+                            error_type = line.split(':')[0].strip().split()[-1]
+                            error_patterns[error_type] = error_patterns.get(error_type, 0) + 1
+            
+            for error_type, count in error_patterns.items():
+                context += f"- {error_type}: {count} occurrence(s)\n"
+        
+        return context
+    
+    def get_all_logs_formatted(self):
+        """Get all execution logs as formatted string"""
+        if not self.execution_history:
+            return "No execution logs available."
+        
+        all_logs = ""
+        for log in self.execution_history:
+            all_logs += log.get_formatted_log()
+        
+        return all_logs
+    
+    def get_statistics(self):
+        """Get execution statistics"""
+        if not self.execution_history:
+            return "No execution statistics available."
+        
+        total = len(self.execution_history)
+        successful = len([log for log in self.execution_history if log.success])
+        failed = total - successful
+        
+        avg_time = sum(log.execution_time for log in self.execution_history) / total
+        
+        stats = f"EXECUTION STATISTICS:\n"
+        stats += f"Total Executions: {total}\n"
+        stats += f"Successful: {successful} ({successful/total*100:.1f}%)\n"
+        stats += f"Failed: {failed} ({failed/total*100:.1f}%)\n"
+        stats += f"Average Execution Time: {avg_time:.3f}s\n"
+        
+        if self.execution_history:
+            last_execution = self.execution_history[-1]
+            stats += f"Last Execution: {last_execution.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            stats += f"Last Status: {'Success' if last_execution.success else 'Failed'}\n"
+        
+        return stats
+    
+    def clear_history(self):
+        """Clear execution history"""
+        self.execution_history.clear()
+        self.logs_updated.emit("Execution history cleared.\n")
+    
     def execute_gemini_response(self, response_text):
         """Extract and execute code from QGIS Copilot response"""
         code_blocks = self.extract_code_blocks(response_text)
         
         if not code_blocks:
+            execution_log = ExecutionLog(
+                code="",
+                success=False,
+                output="",
+                error_msg="No executable code found in the response.",
+                execution_time=0
+            )
             self.execution_completed.emit(
                 "No executable code found in the response.", 
-                False
+                False,
+                execution_log
             )
             return
         
@@ -209,9 +417,29 @@ class PyQGISExecutor(QObject):
         for i, code in enumerate(code_blocks):
             if len(code_blocks) > 1:
                 result_msg = f"Executing code block {i+1}/{len(code_blocks)}:\n"
-                self.execution_completed.emit(result_msg, True)
+                # Create a simple log for the block separator
+                separator_log = ExecutionLog(
+                    code=f"# Block {i+1}/{len(code_blocks)}",
+                    success=True,
+                    output=result_msg,
+                    execution_time=0
+                )
+                self.execution_completed.emit(result_msg, True, separator_log)
             
             self.execute_code(code.strip())
+    
+    def suggest_improvement(self, failed_execution_log):
+        """Analyze failed execution and suggest improvements to AI"""
+        if not failed_execution_log or failed_execution_log.success:
+            return
+        
+        # Create improvement suggestion based on error pattern
+        suggestion = "The previous code execution failed. Please analyze the error and provide a complete, corrected, and executable script.\n\n"
+        suggestion += f"Failed Code:\n```python\n{failed_execution_log.code}\n```\n\n"
+        suggestion += f"Error Details:\n```\n{failed_execution_log.error_msg}\n```\n\n"
+        suggestion += "Your task is to provide a new version of the script that fixes the error. Do not just explain the problem."
+        
+        self.improvement_suggested.emit(failed_execution_log.code, suggestion)
     
     def get_available_functions(self):
         """Get list of available QGIS functions for context"""

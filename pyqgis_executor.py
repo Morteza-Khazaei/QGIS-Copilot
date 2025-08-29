@@ -17,10 +17,11 @@ from pathlib import Path
 from qgis.core import (
     QgsProject, QgsApplication, QgsMessageLog, Qgis,
     QgsVectorLayer, QgsRasterLayer, QgsMapLayer, QgsWkbTypes,
-    QgsFeature, QgsGeometry, QgsField, QgsPointXY, QgsCoordinateReferenceSystem
+    QgsFeature, QgsGeometry, QgsField, QgsPointXY, QgsCoordinateReferenceSystem,
+    edit
 )
 from qgis.gui import QgsMapCanvas
-from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant
+from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant, QSettings
 
 
 class ExecutionLog:
@@ -101,6 +102,7 @@ class EnhancedPyQGISExecutor(QObject):
             'QgsCoordinateReferenceSystem': QgsCoordinateReferenceSystem,
             'Qgis': Qgis,
             'QVariant': QVariant,
+            'edit': edit,
             
             # Python built-ins (safe subset)
             'print': print,
@@ -168,22 +170,22 @@ class EnhancedPyQGISExecutor(QObject):
             (r'import\s+sys', "Importing 'sys' is not allowed. Use the provided environment."),
             (r'from\s+os', "Importing from 'os' is not allowed."),
             (r'from\s+subprocess', "Importing from 'subprocess' is not allowed."),
-            (r'exec\s*\(', "Use of 'exec' is not allowed."),
-            (r'eval\s*\(', "Use of 'eval' is not allowed."),
+            (r'\bexec\s*\(', "Use of 'exec' is not allowed."),
+            (r'\beval\s*\(', "Use of 'eval' is not allowed."),
             (r'__import__', "Use of '__import__' is not allowed."),
             (r'open\s*\(', "File I/O with 'open' is not allowed."),
             (r'file\s*\(', "File I/O with 'file' is not allowed."),
-            (r'compile\s*\(', "Use of 'compile' is not allowed."),
-            (r'globals\s*\(', "Accessing 'globals()' is not allowed."),
-            (r'locals\s*\(', "Accessing 'locals()' is not allowed."),
-            (r'vars\s*\(', "Accessing 'vars()' is not allowed."),
-            (r'dir\s*\(', "Use of 'dir()' is not allowed."),
-            (r'delattr', "Use of 'delattr' is not allowed."),
-            (r'setattr', "Use of 'setattr' is not allowed."),
-            (r'hasattr', "Use of 'hasattr' is not allowed."),
-            (r'reload', "Use of 'reload' is not allowed."),
-            (r'input\s*\(', "Use of 'input()' is not allowed for security."),
-            (r'raw_input\s*\(', "Use of 'raw_input()' is not allowed for security."),
+            (r'\bcompile\s*\(', "Use of 'compile' is not allowed."),
+            (r'\bglobals\s*\(', "Accessing 'globals()' is not allowed."),
+            (r'\blocals\s*\(', "Accessing 'locals()' is not allowed."),
+            (r'\bvars\s*\(', "Accessing 'vars()' is not allowed."),
+            (r'\bdir\s*\(', "Use of 'dir()' is not allowed."),
+            (r'\bdelattr\s*\(', "Use of 'delattr' is not allowed."),
+            (r'\bsetattr\s*\(', "Use of 'setattr' is not allowed."),
+            (r'\bhasattr\s*\(', "Use of 'hasattr' is not allowed."),
+            (r'\breload\s*\(', "Use of 'reload' is not allowed."),
+            (r'\binput\s*\(', "Use of 'input()' is not allowed for security."),
+            (r'\braw_input\s*\(', "Use of 'raw_input()' is not allowed for security."),
             (r'\.system\s*\(', "Calling 'system' is not allowed."),
             (r'\.popen\s*\(', "Calling 'popen' is not allowed."),
             (r'\.call\s*\(', "Calling 'call' is not allowed."),
@@ -442,7 +444,7 @@ class EnhancedPyQGISExecutor(QObject):
             self.execute_code(code.strip())
 
     def execute_response_via_console(self, response_text):
-        """Extract code, write to temp files, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
+        """Extract code, write to a single workspace script, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
         code_blocks = self.extract_code_blocks(response_text)
 
         if not code_blocks:
@@ -460,66 +462,119 @@ class EnhancedPyQGISExecutor(QObject):
             )
             return
 
-        for i, code in enumerate(code_blocks):
-            # Write to temp file
+        # Merge all code blocks to keep a single script file for iterative improvements
+        merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
+        # Light cleanup to avoid common pitfalls
+        # - Remove incorrect iface import (iface is provided by QGIS and injected)
+        merged = re.sub(r"^\s*from\s+qgis\.gui\s+import\s+iface\s*$", "", merged, flags=re.MULTILINE)
+        merged_code = merged
+
+        # Write to a stable file path in the workspace
+        try:
+            workspace_dir = self.get_workspace_dir()
+            fpath = os.path.join(workspace_dir, "qgis_copilot_script.py")
+            compat_header = (
+                "# QGIS Copilot compatibility header (QVariant shim for QGIS 3)\n"
+                "try:\n"
+                "    import qgis\n"
+                "    import qgis.core as _qcore\n"
+                "    from qgis.PyQt.QtCore import QVariant as _QVariant\n"
+                "    if not hasattr(_qcore, 'QVariant'):\n"
+                "        setattr(_qcore, 'QVariant', _QVariant)\n"
+                "except Exception:\n"
+                "    pass\n\n"
+            )
+            with open(fpath, 'w', encoding='utf-8') as fh:
+                fh.write(compat_header)
+                fh.write(merged_code)
+
+            # Try to open the Python console and load the script in the editor (best-effort)
             try:
-                tmp_dir = tempfile.gettempdir()
-                fname = f"qgis_copilot_{int(time.time()*1000)}_{i+1}.py"
-                fpath = os.path.join(tmp_dir, fname)
-                with open(fpath, 'w', encoding='utf-8') as fh:
-                    fh.write(code.strip())
+                if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                    self.iface.actionShowPythonDialog().trigger()
+            except Exception as e:
+                QgsMessageLog.logMessage(f"Could not open Python Console automatically: {e}", "QGIS Copilot", level=Qgis.Warning)
 
-                # Try to open the Python console and load the script in the editor (best-effort)
+            # Attempt to open in console editor via internal plugin if exposed
+            try:
+                import qgis.utils as qutils
+                pc = None
+                if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                    pc = qutils.plugins.get('PythonConsole')
+                for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
+                    if pc and hasattr(pc, meth):
+                        try:
+                            getattr(pc, meth)(fpath)
+                            break
+                        except Exception:
+                            pass
+                # Best-effort: try to directly execute the script from the console plugin
+                for run_meth in ('runScriptFile', 'execScriptFile', 'executeScriptFile', 'runFile'):
+                    if pc and hasattr(pc, run_meth):
+                        try:
+                            getattr(pc, run_meth)(fpath)
+                            break
+                        except Exception:
+                            pass
                 try:
-                    if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
-                        self.iface.actionShowPythonDialog().trigger()
-                except Exception as e:
-                    QgsMessageLog.logMessage(f"Could not open Python Console automatically: {e}", "QGIS Copilot", level=Qgis.Warning)
-
-                # Attempt to open in console editor via internal plugin if exposed
-                try:
-                    import qgis.utils as qutils
-                    pc = None
-                    if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
-                        pc = qutils.plugins.get('PythonConsole')
-                    # Try common method names defensively
-                    for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
-                        if pc and hasattr(pc, meth):
-                            try:
-                                getattr(pc, meth)(fpath)
-                                break
-                            except Exception:
-                                pass
+                    console = getattr(pc, 'console', None)
+                    if console and hasattr(console, 'runCommand'):
+                        console.runCommand(f"from pathlib import Path; exec(Path(r'{fpath}').read_text())")
                 except Exception:
                     pass
+            except Exception:
+                pass
 
-                # Build and run the exec command to mirror console behavior
-                wrapper_cmd = f"from pathlib import Path\nexec(Path(r'{fpath}').read_text())"
-                # Informative preface entry for logs/live panel
-                preface = (
-                    f"Temp script created: {fpath}\n"
-                    f"Executing via:\n{wrapper_cmd}\n"
-                )
-                separator_log = ExecutionLog(
-                    code=f"# File: {fpath}",
-                    success=True,
-                    output=preface,
-                    execution_time=0
-                )
-                self.add_to_history(separator_log)
-                # Execute using the standard executor but bypass import cleanup and keep original code in logs
-                self._execute_raw_with_wrapper(original_code=code, wrapper_code=wrapper_cmd)
-            except Exception as e:
-                err = f"Failed to write or execute temp script: {e}"
-                execution_log = ExecutionLog(
-                    code=code,
-                    success=False,
-                    output="",
-                    error_msg=err,
-                    execution_time=0
-                )
-                self.add_to_history(execution_log)
-                self.execution_completed.emit(err, False, execution_log)
+            # Build and run the exec command with a QVariant shim
+            wrapper_cmd = (
+                "from pathlib import Path\n"
+                "import qgis\n"
+                "from qgis.PyQt.QtCore import QVariant as _QVariant\n"
+                "import qgis.core as _qcore\n"
+                "setattr(_qcore, 'QVariant', _QVariant)\n"
+                f"__code__ = Path(r'{fpath}').read_text()\n"
+                f"exec(compile(__code__, r'{fpath}', 'exec'), globals())"
+            )
+            preface = (
+                f"Script saved to workspace: {fpath}\n"
+                f"Executing via:\n{wrapper_cmd}\n"
+            )
+            separator_log = ExecutionLog(
+                code=f"# File: {fpath}",
+                success=True,
+                output=preface,
+                execution_time=0
+            )
+            self.add_to_history(separator_log)
+            self._execute_raw_with_wrapper(original_code=merged_code, wrapper_code=wrapper_cmd)
+        except Exception as e:
+            err = f"Failed to write or execute script: {e}"
+            execution_log = ExecutionLog(
+                code=merged_code,
+                success=False,
+                output="",
+                error_msg=err,
+                execution_time=0
+            )
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(err, False, execution_log)
+
+    def get_workspace_dir(self):
+        """Get or create the workspace directory where scripts are saved."""
+        try:
+            settings = QSettings()
+            configured = settings.value("qgis_copilot/workspace_dir", type=str)
+            if configured and isinstance(configured, str) and configured.strip():
+                path = configured
+            else:
+                # Default to a 'workspace' folder inside the plugin directory
+                plugin_root = os.path.dirname(__file__)
+                path = os.path.join(plugin_root, "workspace")
+            os.makedirs(path, exist_ok=True)
+            return path
+        except Exception:
+            # Fallback to temp directory on any error
+            return tempfile.gettempdir()
 
     def _execute_raw_with_wrapper(self, original_code, wrapper_code):
         """Execute wrapper_code with stdout/stderr capture while logging original_code as CODE."""
@@ -550,8 +605,14 @@ class EnhancedPyQGISExecutor(QObject):
         try:
             sys.stdout = stdout_capture
             sys.stderr = stderr_capture
-            # Execute the wrapper using a minimally augmented environment
-            env = {'iface': self.iface}
+            # Execute the wrapper using a fully augmented environment
+            env = dict(self.globals)
+            env['iface'] = self.iface
+            try:
+                import qgis.core as _qcore
+                env['core'] = _qcore  # allow scripts that erroneously reference core.QgsPointXY
+            except Exception:
+                pass
             exec(wrapper_code, env)
 
             stdout_output = stdout_capture.getvalue()

@@ -9,7 +9,7 @@ import html
 from datetime import datetime
 from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QSettings
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit,
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QTextEdit, QLineEdit,
     QPushButton, QSplitter, QLabel, QCheckBox, QGroupBox,
     QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
     QToolTip
@@ -20,6 +20,7 @@ from qgis.core import QgsMessageLog, Qgis, QgsApplication
 from .gemini_api import GeminiAPI
 from .openai_api import OpenAIAPI
 from .claude_api import ClaudeAPI
+from .ollama_api import OllamaAPI
 from .pyqgis_executor import EnhancedPyQGISExecutor
 
 
@@ -32,16 +33,25 @@ class CopilotChatDialog(QDialog):
         self.chat_history = []
         self.last_response = None
         self.auto_feedback_enabled = False
+        self._normal_geometry = None  # used to restore size after fullscreen
         # Initialize API handlers
         self.gemini_api = GeminiAPI()
         self.openai_api = OpenAIAPI()
         self.claude_api = ClaudeAPI()
+        self.ollama_api = OllamaAPI()
         self.api_handlers = {
             "Google Gemini": self.gemini_api,
             "OpenAI ChatGPT": self.openai_api,
-            "Anthropic Claude": self.claude_api
+            "Anthropic Claude": self.claude_api,
+            "Ollama (Local)": self.ollama_api,
         }
         self.default_system_prompt = self.gemini_api.system_prompt
+
+        # Enable minimize/maximize buttons on the dialog
+        try:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+        except Exception:
+            pass
 
         self.setup_ui()
 
@@ -58,6 +68,8 @@ class CopilotChatDialog(QDialog):
         # Load API key for the default provider
         self.load_current_api_key()
         self.load_system_prompt()
+        self.load_workspace_dir()
+        self.load_preferences()
         
         # Timer for delayed AI feedback
         self.feedback_timer = QTimer()
@@ -67,12 +79,28 @@ class CopilotChatDialog(QDialog):
     
     def setup_ui(self):
         """Setup the user interface"""
-        self.setWindowTitle("QGIS Copilot - Enhanced with Execution Logging")
+        self.setWindowTitle("QGIS Copilot")
         self.setMinimumSize(800, 600)
         self.resize(1000, 700)
         
         # Main layout
         main_layout = QVBoxLayout()
+
+        # Top-right window controls (only if native buttons are unavailable)
+        flags = self.windowFlags()
+        has_native_minmax = bool(flags & Qt.WindowMinimizeButtonHint) or bool(flags & Qt.WindowMaximizeButtonHint)
+        if not has_native_minmax:
+            controls_layout = QHBoxLayout()
+            controls_layout.addStretch()
+            self.minimize_button = QPushButton("Minimize")
+            self.minimize_button.setToolTip("Minimize this window")
+            self.minimize_button.clicked.connect(self.minimize_window)
+            self.fullscreen_button = QPushButton("Fullscreen")
+            self.fullscreen_button.setToolTip("Toggle fullscreen")
+            self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+            controls_layout.addWidget(self.minimize_button)
+            controls_layout.addWidget(self.fullscreen_button)
+            main_layout.addLayout(controls_layout)
         
         # Create tab widget
         self.tab_widget = QTabWidget()
@@ -81,16 +109,40 @@ class CopilotChatDialog(QDialog):
         chat_widget = self.create_chat_tab()
         self.tab_widget.addTab(chat_widget, "Chat")
         
-        # Execution Logs tab
-        logs_widget = self.create_logs_tab()
-        self.tab_widget.addTab(logs_widget, "Execution Logs")
-        
-        # Settings tab
+        # AI tab (provider, keys, model, prompt)
+        ai_widget = self.create_ai_settings_tab()
+        self.tab_widget.addTab(ai_widget, "AI")
+
+        # Settings tab (workspace, execution prefs)
         settings_widget = self.create_settings_tab()
         self.tab_widget.addTab(settings_widget, "Settings")
         
         main_layout.addWidget(self.tab_widget)
         self.setLayout(main_layout)
+
+    def minimize_window(self):
+        """Minimize the dialog window."""
+        try:
+            self.showMinimized()
+        except Exception:
+            pass
+
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode for the dialog window."""
+        try:
+            if self.isFullScreen():
+                self.showNormal()
+                if self._normal_geometry:
+                    self.restoreGeometry(self._normal_geometry)
+                if hasattr(self, 'fullscreen_button'):
+                    self.fullscreen_button.setText("Fullscreen")
+            else:
+                self._normal_geometry = self.saveGeometry()
+                self.showFullScreen()
+                if hasattr(self, 'fullscreen_button'):
+                    self.fullscreen_button.setText("Exit Fullscreen")
+        except Exception:
+            pass
     
     def create_chat_tab(self):
         """Create the main chat interface tab"""
@@ -130,65 +182,20 @@ class CopilotChatDialog(QDialog):
         
         chat_layout.addLayout(input_layout)
         
-        # Enhanced options
-        options_layout = QVBoxLayout()
-        
-        # First row of options
-        options_row1 = QHBoxLayout()
-        self.include_context_cb = QCheckBox("Include QGIS Context")
-        self.include_context_cb.setChecked(True)
-        
-        self.auto_execute_cb = QCheckBox("Auto-execute Code")
-        self.auto_execute_cb.setChecked(False)
-        
-        options_row1.addWidget(self.include_context_cb)
-        options_row1.addWidget(self.auto_execute_cb)
-        options_row1.addStretch()
-        
-        # Second row of options
-        options_row2 = QHBoxLayout()
-        self.include_logs_cb = QCheckBox("Include Execution Logs in Context")
-        self.include_logs_cb.setChecked(True)
-        self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
-        
-        self.auto_feedback_cb = QCheckBox("Auto Request Improvements on Errors")
-        self.auto_feedback_cb.setChecked(False)
-        self.auto_feedback_cb.setToolTip("Automatically ask AI to improve code when execution fails")
-        self.auto_feedback_cb.toggled.connect(self.on_auto_feedback_toggled)
-        
-        # Run mode option
-        self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
-        self.run_in_console_cb.setChecked(True)
-        self.run_in_console_cb.setToolTip("Writes code to a temp file, opens it in QGIS Python Editor, and runs using exec(Path(file).read_text()) for native logging/tracebacks.")
-
-        options_row2.addWidget(self.include_logs_cb)
-        options_row2.addWidget(self.auto_feedback_cb)
-        options_row2.addWidget(self.run_in_console_cb)
-        options_row2.addStretch()
-        
-        options_layout.addLayout(options_row1)
-        options_layout.addLayout(options_row2)
-        chat_layout.addLayout(options_layout)
+        # Preferences have been moved to Settings tab to reduce chat clutter
         
         # Chat management buttons
         chat_management_layout = QHBoxLayout()
         
-        clear_chat_button = QPushButton("Clear Chat")
-        clear_chat_button.clicked.connect(self.clear_chat)
-        
-        save_chat_button = QPushButton("Save Chat")
-        save_chat_button.clicked.connect(self.save_chat)
-        
-        load_chat_button = QPushButton("Load Chat")
-        load_chat_button.clicked.connect(self.load_chat)
+        clear_all_button = QPushButton("Clear All")
+        clear_all_button.setToolTip("Clear chat history and live logs")
+        clear_all_button.clicked.connect(self.clear_all)
         
         improve_last_button = QPushButton("Request Improvement")
         improve_last_button.clicked.connect(self.request_manual_improvement)
         improve_last_button.setToolTip("Ask AI to improve the last failed code execution")
         
-        chat_management_layout.addWidget(clear_chat_button)
-        chat_management_layout.addWidget(save_chat_button)
-        chat_management_layout.addWidget(load_chat_button)
+        chat_management_layout.addWidget(clear_all_button)
         chat_management_layout.addWidget(improve_last_button)
         chat_management_layout.addStretch()
         chat_layout.addLayout(chat_management_layout)
@@ -202,22 +209,24 @@ class CopilotChatDialog(QDialog):
         
         # Execution results header with buttons
         exec_header_layout = QHBoxLayout()
-        exec_header_layout.addWidget(QLabel("Live Execution Results:"))
+        exec_header_layout.addWidget(QLabel("Live Logs:"))
 
         # Create the display widget before connecting signals to it
         self.execution_display = QTextEdit()
         self.execution_display.setMinimumWidth(350)
         self.execution_display.setReadOnly(True)
-        self.execution_display.setFont(QFont("Consolas", 9))
+        self.execution_display.setFont(QFont("Consolas", 10))
+        # Terminal-like black panel for live logs
+        self.execution_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e; /* terminal black */
+                color: #d4d4d4;            /* terminal light text */
+                border: 1px solid #333333;
+                padding: 6px;
+            }
+        """)
 
-        clear_exec_button = QPushButton("Clear Results")
-        clear_exec_button.clicked.connect(self.execution_display.clear)
-        
-        show_stats_button = QPushButton("Show Statistics")
-        show_stats_button.clicked.connect(self.show_execution_statistics)
-        
-        exec_header_layout.addWidget(show_stats_button)
-        exec_header_layout.addWidget(clear_exec_button)
+        # Removed separate clear button here; use unified 'Clear All' above
         exec_header_layout.addStretch()
         
         execution_layout.addLayout(exec_header_layout)
@@ -239,65 +248,82 @@ class CopilotChatDialog(QDialog):
         chat_widget.setLayout(layout)
         return chat_widget
     
-    def create_logs_tab(self):
-        """Create the execution logs tab"""
-        logs_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Header with controls
-        header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("Detailed Execution History:"))
-        
-        refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self.refresh_logs_display)
-        
-        clear_logs_button = QPushButton("Clear History")
-        clear_logs_button.clicked.connect(self.clear_execution_history)
-        
-        export_logs_button = QPushButton("Export Logs")
-        export_logs_button.clicked.connect(self.export_execution_logs)
-        
-        header_layout.addWidget(refresh_button)
-        header_layout.addWidget(export_logs_button)
-        header_layout.addWidget(clear_logs_button)
-        header_layout.addStretch()
-        
-        layout.addLayout(header_layout)
-        
-        # Statistics display
-        self.stats_display = QLabel("No execution statistics available.")
-        self.stats_display.setStyleSheet("""
-            QLabel {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                padding: 8px;
-                border-radius: 4px;
-                font-family: monospace;
-                font-size: 9pt;
-            }
-        """)
-        layout.addWidget(self.stats_display)
-        
-        # Full logs display
-        self.full_logs_display = QTextEdit()
-        self.full_logs_display.setReadOnly(True)
-        self.full_logs_display.setFont(QFont("Consolas", 9))
-        self.full_logs_display.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-            }
-        """)
-        layout.addWidget(self.full_logs_display)
-        
-        logs_widget.setLayout(layout)
-        return logs_widget
+    # Logs tab removed; live logs are displayed within the Chat tab
     
     def create_settings_tab(self):
-        """Create the settings tab"""
+        """Create the non-AI settings tab (workspace, execution prefs)"""
         settings_widget = QWidget()
         layout = QVBoxLayout()
+
+        # Workspace settings
+        workspace_group = QGroupBox("Workspace (Script Save Location)")
+        ws_layout = QVBoxLayout()
+        ws_layout.addWidget(QLabel("Choose where QGIS Copilot saves and runs generated Python scripts:"))
         
+        ws_row = QHBoxLayout()
+        self.workspace_dir_input = QLineEdit()
+        self.workspace_dir_input.setPlaceholderText("Select a folder to store generated scripts...")
+        ws_browse_btn = QPushButton("Browse…")
+        ws_browse_btn.clicked.connect(self.browse_workspace_dir)
+        ws_open_btn = QPushButton("Open Folder")
+        ws_open_btn.clicked.connect(self.open_workspace_dir)
+        ws_save_btn = QPushButton("Save")
+        ws_save_btn.clicked.connect(self.save_workspace_dir)
+        ws_row.addWidget(self.workspace_dir_input)
+        ws_row.addWidget(ws_browse_btn)
+        ws_row.addWidget(ws_open_btn)
+        ws_row.addWidget(ws_save_btn)
+        ws_layout.addLayout(ws_row)
+        
+        ws_hint = QLabel("If unset, Copilot defaults to a 'workspace' folder inside the plugin directory.")
+        ws_hint.setWordWrap(True)
+        ws_layout.addWidget(ws_hint)
+
+        workspace_group.setLayout(ws_layout)
+        layout.addWidget(workspace_group)
+
+        # Chat and Execution Preferences
+        prefs_group = QGroupBox("Chat and Execution Preferences")
+        prefs_layout = QVBoxLayout()
+
+        # Organized grid for checkboxes (2 columns)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        # Chat context options (left column)
+        self.include_context_cb = QCheckBox("Include QGIS Context")
+        self.include_logs_cb = QCheckBox("Include Execution Logs in Context")
+        self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
+        grid.addWidget(self.include_context_cb, 0, 0)
+        grid.addWidget(self.include_logs_cb, 1, 0)
+
+        # Execution behavior options (right column)
+        self.auto_execute_cb = QCheckBox("Auto-execute Code")
+        self.auto_feedback_cb = QCheckBox("Auto Request Improvements on Errors")
+        self.auto_feedback_cb.setToolTip("Automatically ask AI to improve code when execution fails")
+        self.auto_feedback_cb.toggled.connect(self.on_auto_feedback_toggled)
+        grid.addWidget(self.auto_execute_cb, 0, 1)
+        grid.addWidget(self.auto_feedback_cb, 1, 1)
+
+        # Console execution option spans both columns
+        self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
+        self.run_in_console_cb.setToolTip("Writes code to a file in your Workspace, opens it in the QGIS Python Editor, then executes it for native logging/tracebacks.")
+        grid.addWidget(self.run_in_console_cb, 2, 0, 1, 2)
+
+        prefs_layout.addLayout(grid)
+        prefs_group.setLayout(prefs_layout)
+        layout.addWidget(prefs_group)
+
+        layout.addStretch()
+        settings_widget.setLayout(layout)
+        return settings_widget
+
+    def create_ai_settings_tab(self):
+        """Create a dedicated AI settings tab (provider, keys, model, prompt)"""
+        ai_widget = QWidget()
+        layout = QVBoxLayout()
+
         # API Provider selection
         provider_group = QGroupBox("API Provider")
         provider_layout = QVBoxLayout()
@@ -307,40 +333,65 @@ class CopilotChatDialog(QDialog):
         provider_layout.addWidget(self.api_provider_combo)
         provider_group.setLayout(provider_layout)
         layout.addWidget(provider_group)
-        
+
         # API Key section
         self.api_group = QGroupBox("API Configuration")
         api_layout = QVBoxLayout()
-        
+
         self.api_key_label = QLabel("API Key:")
         api_layout.addWidget(self.api_key_label)
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
         api_layout.addWidget(self.api_key_input)
-        
+
         api_button_layout = QHBoxLayout()
+
+        self.save_key_button = QPushButton("Save API Key")
+        self.save_key_button.clicked.connect(self.save_api_key)
         
-        save_key_button = QPushButton("Save API Key")
-        save_key_button.clicked.connect(self.save_api_key)
+        self.test_key_button = QPushButton("Test API Key")
+        self.test_key_button.clicked.connect(self.test_api_key)
         
-        test_key_button = QPushButton("Test API Key")
-        test_key_button.clicked.connect(self.test_api_key)
-        
-        api_button_layout.addWidget(save_key_button)
-        api_button_layout.addWidget(test_key_button)
+        api_button_layout.addWidget(self.save_key_button)
+        api_button_layout.addWidget(self.test_key_button)
         api_button_layout.addStretch()
-        
+
         api_layout.addLayout(api_button_layout)
-        
+
         # Instructions
         self.instructions_label = QLabel()
         self.instructions_label.setWordWrap(True)
         self.instructions_label.setOpenExternalLinks(True)
         api_layout.addWidget(self.instructions_label)
-        
+
         self.api_group.setLayout(api_layout)
         layout.addWidget(self.api_group)
-        
+
+        # Ollama-specific configuration (shown only when provider is Ollama)
+        self.ollama_group = QGroupBox("Ollama Configuration")
+        ollama_layout = QVBoxLayout()
+        ollama_layout.addWidget(QLabel("Base URL (daemon):"))
+        self.ollama_base_url_input = QLineEdit()
+        self.ollama_base_url_input.setPlaceholderText("http://localhost:11434")
+        self.ollama_base_url_input.setText(self.ollama_api.get_base_url())
+        ollama_layout.addWidget(self.ollama_base_url_input)
+
+        ollama_btn_row = QHBoxLayout()
+        self.ollama_save_url_btn = QPushButton("Save Base URL")
+        self.ollama_save_url_btn.clicked.connect(self.on_save_ollama_base_url)
+        self.ollama_check_btn = QPushButton("Check Connection")
+        self.ollama_check_btn.clicked.connect(self.on_check_ollama_connection)
+        self.ollama_refresh_models_btn = QPushButton("Refresh Models")
+        self.ollama_refresh_models_btn.clicked.connect(self.on_refresh_ollama_models)
+        ollama_btn_row.addWidget(self.ollama_save_url_btn)
+        ollama_btn_row.addWidget(self.ollama_check_btn)
+        ollama_btn_row.addWidget(self.ollama_refresh_models_btn)
+        ollama_btn_row.addStretch()
+        ollama_layout.addLayout(ollama_btn_row)
+
+        self.ollama_group.setLayout(ollama_layout)
+        layout.addWidget(self.ollama_group)
+
         # Model settings
         model_group = QGroupBox("Model Settings")
         model_layout = QVBoxLayout()
@@ -364,9 +415,20 @@ class CopilotChatDialog(QDialog):
         prompt_info_label.setWordWrap(True)
         prompt_layout.addWidget(prompt_info_label)
 
+        # Prompt editor: single scrollbar inside the editor, buttons remain outside
         self.system_prompt_input = QTextEdit()
         self.system_prompt_input.setAcceptRichText(False)
-        self.system_prompt_input.setMinimumHeight(150)
+        # Fix visible height to roughly 10 lines; let editor scroll internally
+        try:
+            line_height = self.system_prompt_input.fontMetrics().lineSpacing()
+            target_height = int(line_height * 10 + 12)
+            self.system_prompt_input.setFixedHeight(target_height)
+        except Exception:
+            self.system_prompt_input.setFixedHeight(220)
+
+        self.system_prompt_input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.system_prompt_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
         prompt_layout.addWidget(self.system_prompt_input)
 
         prompt_button_layout = QHBoxLayout()
@@ -385,11 +447,11 @@ class CopilotChatDialog(QDialog):
         layout.addWidget(prompt_group)
 
         layout.addStretch()
-        settings_widget.setLayout(layout)
-        return settings_widget
+        ai_widget.setLayout(layout)
+        return ai_widget
     
     def setup_chat_display_style(self):
-        """Setup styling for the chat display"""
+        """Setup styling for the chat display (QGIS default-like)"""
         self.chat_display.setStyleSheet("""
             QTextBrowser {
                 background-color: #ffffff;
@@ -449,14 +511,35 @@ class CopilotChatDialog(QDialog):
         self.api_group.setTitle(f"{provider_name} API Configuration")
         self.api_key_label.setText(f"API Key for {provider_name}:")
 
+        # Show/hide API key controls for local providers like Ollama
+        is_local = (provider_name == "Ollama (Local)")
+        self.api_key_label.setVisible(not is_local)
+        self.api_key_input.setVisible(not is_local)
+        self.save_key_button.setVisible(not is_local)
+        self.test_key_button.setVisible(not is_local)
+        # Ollama config group visibility
+        self.ollama_group.setVisible(is_local)
+
         # Disconnect signal to prevent premature firing while we update the UI
         self.model_selection_combo.blockSignals(True)
         self.model_selection_combo.clear()
 
         if hasattr(self.current_api, 'AVAILABLE_MODELS'):
-            self.model_selection_combo.addItems(self.current_api.AVAILABLE_MODELS)
-            self.model_selection_combo.setCurrentText(self.current_api.model)
-            self.model_selection_combo.setVisible(len(self.current_api.AVAILABLE_MODELS) > 1)
+            models = []
+            # Try to fetch dynamic models for Ollama
+            if is_local and hasattr(self.current_api, 'list_models'):
+                try:
+                    models = self.current_api.list_models()
+                except Exception as e:
+                    QgsMessageLog.logMessage(f"Ollama models fetch failed: {e}", "QGIS Copilot", level=Qgis.Warning)
+            if not models:
+                models = getattr(self.current_api, 'AVAILABLE_MODELS', [])
+
+            self.model_selection_combo.addItems(models)
+            if hasattr(self.current_api, 'model'):
+                # Select current model if present
+                self.model_selection_combo.setCurrentText(self.current_api.model)
+            self.model_selection_combo.setVisible(len(models) > 1)
 
         self.model_selection_combo.blockSignals(False)
         
@@ -486,6 +569,47 @@ To use Claude, you need an Anthropic API key:<br>
 3. Enter it above and click 'Save API Key'.<br><br>
 <i>Note: Anthropic API usage may incur costs.</i>
             """)
+        elif provider_name == "Ollama (Local)":
+            self.instructions_label.setText("""
+<b>Using Ollama (Local)</b><br><br>
+Ollama runs models locally — no API key required. Install and start Ollama, then pull a model:<br>
+<code>ollama run gpt-oss:20b</code><br><br>
+Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>. You can change the model from the list above.
+            """)
+
+    # Ollama UI actions
+    def on_save_ollama_base_url(self):
+        url = self.ollama_base_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Warning", "Please enter a valid base URL.")
+            return
+        try:
+            self.ollama_api.set_base_url(url)
+            QMessageBox.information(self, "Saved", f"Ollama base URL set to {url}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save base URL: {e}")
+
+    def on_check_ollama_connection(self):
+        try:
+            models = self.ollama_api.list_models()
+            count = len(models)
+            QMessageBox.information(self, "Ollama Connection", f"Connected. {count} model(s) available.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ollama Connection", f"Connection failed: {e}")
+
+    def on_refresh_ollama_models(self):
+        try:
+            models = self.ollama_api.list_models()
+            self.model_selection_combo.blockSignals(True)
+            self.model_selection_combo.clear()
+            self.model_selection_combo.addItems(models)
+            # Keep current selection if possible
+            if self.ollama_api.model in models:
+                self.model_selection_combo.setCurrentText(self.ollama_api.model)
+            self.model_selection_combo.blockSignals(False)
+            QMessageBox.information(self, "Ollama Models", f"Loaded {len(models)} model(s).")
+        except Exception as e:
+            QMessageBox.critical(self, "Ollama Models", f"Failed to load models: {e}")
 
     def load_current_api_key(self):
         """Load saved API key for the current provider"""
@@ -554,6 +678,33 @@ To use Claude, you need an Anthropic API key:<br>
         self.system_prompt_input.setText(saved_prompt)
         self.update_all_system_prompts(saved_prompt)
 
+    def load_preferences(self):
+        """Load chat/execution preferences from QSettings and apply defaults."""
+        settings = QSettings()
+        self.include_context_cb.setChecked(settings.value("qgis_copilot/prefs/include_context", True, type=bool))
+        self.include_logs_cb.setChecked(settings.value("qgis_copilot/prefs/include_logs", True, type=bool))
+        self.auto_execute_cb.setChecked(settings.value("qgis_copilot/prefs/auto_execute", False, type=bool))
+        self.auto_feedback_cb.setChecked(settings.value("qgis_copilot/prefs/auto_feedback", False, type=bool))
+        self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", True, type=bool))
+        self.auto_feedback_enabled = self.auto_feedback_cb.isChecked()
+
+        # Persist on change
+        self.include_context_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_context", v))
+        self.include_logs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_logs", v))
+        self.auto_execute_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/auto_execute", v))
+        self.auto_feedback_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/auto_feedback", v))
+        self.run_in_console_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/run_in_console", v))
+
+    def load_workspace_dir(self):
+        """Load the workspace directory from settings into the UI."""
+        settings = QSettings()
+        ws = settings.value("qgis_copilot/workspace_dir", type=str)
+        if not ws:
+            # Show the computed default but do not persist until user saves
+            plugin_root = os.path.dirname(__file__)
+            ws = os.path.join(plugin_root, "workspace")
+        self.workspace_dir_input.setText(ws)
+
     def save_system_prompt(self):
         """Save the custom system prompt to settings."""
         prompt_text = self.system_prompt_input.toPlainText()
@@ -561,6 +712,35 @@ To use Claude, you need an Anthropic API key:<br>
         settings.setValue("qgis_copilot/system_prompt", prompt_text)
         self.update_all_system_prompts(prompt_text)
         QMessageBox.information(self, "Success", "System prompt saved successfully!")
+
+    def save_workspace_dir(self):
+        """Persist the workspace directory to settings and ensure it exists."""
+        path = self.workspace_dir_input.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Warning", "Please select a valid folder for the workspace.")
+            return
+        try:
+            os.makedirs(path, exist_ok=True)
+            settings = QSettings()
+            settings.setValue("qgis_copilot/workspace_dir", path)
+            QMessageBox.information(self, "Success", f"Workspace saved: {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save workspace: {e}")
+
+    def browse_workspace_dir(self):
+        """Open a folder picker to choose the workspace directory."""
+        current = self.workspace_dir_input.text().strip()
+        folder = QFileDialog.getExistingDirectory(self, "Select Workspace Folder", current or os.path.expanduser("~"))
+        if folder:
+            self.workspace_dir_input.setText(folder)
+
+    def open_workspace_dir(self):
+        """Open the current workspace directory in the system file browser."""
+        path = self.workspace_dir_input.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Warning", "Workspace folder is empty. Save a valid path first.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def reset_system_prompt(self):
         """Reset the system prompt to its default value."""
@@ -621,6 +801,66 @@ To use Claude, you need an Anthropic API key:<br>
             except (json.JSONDecodeError, IndexError):
                 # Not a parsable JSON error, fall back to default
                 pass
+        elif self.current_api_name == "Google Gemini":
+            try:
+                # Gemini error strings often look like: "API Error 429: { ... JSON ... }"
+                json_str_start = error.find('{')
+                if json_str_start != -1:
+                    json_str = error[json_str_start:]
+                    data = json.loads(json_str)
+                    err = data.get("error", {})
+                    code = err.get("code")
+                    status = err.get("status") or ""
+                    message = err.get("message") or ""
+                    details = err.get("details", []) or []
+
+                    help_url = None
+                    quota_value = None
+                    quota_id = None
+                    quota_metric = None
+                    model_name = None
+                    retry_after = None
+
+                    for d in details:
+                        t = d.get("@type", "")
+                        if t.endswith("google.rpc.Help"):
+                            links = d.get("links", [])
+                            if links:
+                                help_url = links[0].get("url")
+                        elif t.endswith("google.rpc.QuotaFailure"):
+                            vios = d.get("violations", [])
+                            if vios:
+                                v = vios[0]
+                                quota_metric = v.get("quotaMetric")
+                                quota_id = v.get("quotaId")
+                                quota_value = v.get("quotaValue")
+                                dims = v.get("quotaDimensions", {})
+                                model_name = dims.get("model") or model_name
+                        elif t.endswith("google.rpc.RetryInfo"):
+                            retry_after = d.get("retryDelay")
+
+                    # Compose a friendlier message
+                    if code == 429 or status == "RESOURCE_EXHAUSTED":
+                        parts = []
+                        parts.append("You've hit a Google Gemini rate/quota limit.")
+                        if model_name:
+                            parts.append(f"Model: {model_name}.")
+                        if quota_value:
+                            parts.append(f"Daily free-tier limit: {quota_value} requests.")
+                        if retry_after:
+                            parts.append(f"Retry available in {retry_after}.")
+                        if message:
+                            parts.append(message)
+                        if help_url:
+                            parts.append(f"<a href=\"{help_url}\">Learn more about Gemini API quotas</a>.")
+                        user_friendly_error = " ".join(parts)
+                    elif message:
+                        # Default to the server-provided message with any help link
+                        suffix = f" <a href=\"{help_url}\">More info</a>." if help_url else ""
+                        user_friendly_error = f"{message}{suffix}"
+            except (json.JSONDecodeError, IndexError, TypeError):
+                # Not a parsable JSON error, fall back to default
+                pass
         elif self.current_api_name == "Anthropic Claude":
             pass  # Can add specific Claude error parsing here in the future
         
@@ -654,7 +894,7 @@ To use Claude, you need an Anthropic API key:<br>
         status_text = "succeeded" if success else "failed"
         self.add_to_chat(
             "System",
-            f"Code execution {status_text}. See 'Live Execution Results' and 'Execution Logs' for details.",
+            f"Code execution {status_text}. See the Live Logs panel for details.",
             summary_color,
         )
 
@@ -668,8 +908,6 @@ To use Claude, you need an Anthropic API key:<br>
     def handle_logs_updated(self, formatted_log_entry):
         """Append new log entry to the live display."""
         self.add_to_execution_results(formatted_log_entry)
-        # Keep the 'Execution Logs' tab in sync automatically
-        self.refresh_logs_display()
 
     def handle_improvement_suggestion(self, original_code, suggestion_prompt):
         self.add_to_chat("System", "Requesting improvement for the last failed script...", "#6c757d")
@@ -694,12 +932,27 @@ To use Claude, you need an Anthropic API key:<br>
         """Renders a single message to the chat display"""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
+        # Ensure a blank line separates every message in rendered view and copied text
+        try:
+            if self.chat_display.toPlainText().strip():
+                cursor.insertText("\n\n")
+        except Exception:
+            pass
 
         is_user = (sender == "You")
+        is_system = (sender == "System")
         align = "right" if is_user else "left"
-        
-        bubble_bg_color = "#e7f5ff" if is_user else "#f8f9fa"
-        bubble_border_color = "#cce5ff" if is_user else "#dee2e6"
+
+        # Simple, unobtrusive palettes (default-like)
+        if is_user:
+            bubble_bg_color = "#e6f7ff"   # light blue
+            bubble_border_color = "#b3e0ff"
+        elif is_system:
+            bubble_bg_color = "#f5f5f5"   # light gray
+            bubble_border_color = "#d9d9d9"
+        else:
+            bubble_bg_color = "#f6ffed"   # light green for agent
+            bubble_border_color = "#b7eb8f"
 
         # Main div for alignment
         html = f'<div style="margin: 0 5px; text-align: {align};">'
@@ -718,7 +971,7 @@ To use Claude, you need an Anthropic API key:<br>
             margin-bottom: 5px;
         ">
             <div>
-                <strong style="color: {color};">{sender}</strong> 
+                <strong style="color: {color};">{sender}</strong>
                 <span style="color: #6c757d; font-size: 8pt;">({timestamp})</span>
             </div>
             <div style="margin-top: 5px; white-space: pre-wrap; word-wrap: break-word;">{self.format_message_content(message)}</div>
@@ -729,55 +982,7 @@ To use Claude, you need an Anthropic API key:<br>
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
 
-    def save_chat(self):
-        """Save the current chat history to a JSON file."""
-        if not self.chat_history:
-            QMessageBox.information(self, "Info", "Chat history is empty. Nothing to save.")
-            return
-
-        # Generate a default filename with a timestamp
-        timestamp = datetime.now().strftime("%b %d, %Y, %I_%M_%S %p")
-        default_filename = f"QGIS Copilot Chat {timestamp}"
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Chat History",
-            default_filename,
-            "JSON Files (*.json);;All Files (*)"
-        )
-
-        if file_path:
-            try:
-                with open(file_path, 'w') as f:
-                    json.dump(self.chat_history, f, indent=4)
-                QMessageBox.information(self, "Success", f"Chat history saved to {os.path.basename(file_path)}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save chat history: {e}")
-
-    def load_chat(self):
-        """Load a chat history from a JSON file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Chat History",
-            "",
-            "JSON Files (*.json);;All Files (*)"
-        )
-
-        if file_path:
-            try:
-                with open(file_path, 'r') as f:
-                    loaded_history = json.load(f)
-                
-                if not isinstance(loaded_history, list) or not all('sender' in item and 'message' in item for item in loaded_history):
-                    raise ValueError("Invalid chat history file format.")
-
-                self.clear_chat(confirm=False)
-                self.chat_history = loaded_history
-                self.repopulate_chat_display()
-                QMessageBox.information(self, "Success", f"Chat history loaded from {os.path.basename(file_path)}")
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load chat history: {e}")
+    # Removed: save_chat and load_chat (chat file I/O no longer supported)
 
     def clear_chat(self, confirm=True):
         """Clear the chat history and display."""
@@ -793,26 +998,32 @@ To use Claude, you need an Anthropic API key:<br>
         self.last_response = None
         self.execute_button.setEnabled(False)
 
-    def repopulate_chat_display(self):
-        """Repopulate the chat display from the chat_history list."""
-        self.chat_display.clear()
-        for item in self.chat_history:
-            self.render_message(
-                item.get('sender'),
-                item.get('message'),
-                item.get('color', '#000000'),
-                item.get('timestamp', '')
-            )
-        
-        # Find the last AI response to enable the execute button
-        for item in reversed(self.chat_history):
-            if item.get('sender') not in ("You", "System"):
-                self.last_response = item.get('message')
-                self.execute_button.setEnabled(True)
-                break
-        else:
-            self.last_response = None
-            self.execute_button.setEnabled(False)
+    def clear_all(self):
+        """Clear both chat history and live logs in one action."""
+        reply = QMessageBox.question(
+            self,
+            'Confirm Clear All',
+            "Clear chat history and live logs? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+
+        # Clear chat without extra confirmation
+        self.clear_chat(confirm=False)
+
+        # Clear live logs UI and internal executor history
+        try:
+            self.execution_display.clear()
+        except Exception:
+            pass
+        try:
+            self.pyqgis_executor.clear_history()
+        except Exception:
+            pass
+
+    # Removed: repopulate_chat_display (previously used by load_chat)
     
     def format_message_content(self, content):
         """Format message content with syntax highlighting for code"""
@@ -820,20 +1031,21 @@ To use Claude, you need an Anthropic API key:<br>
         def format_code_block(match):
             code_to_display = html.escape(match.group(1).strip())
 
+            # Always render code in a solid black box for contrast
             header = (
-                '<div style="background-color: #3c3f41; color: #bbbbbb; padding: 6px 10px; '
-                'border: 1px solid #555; border-bottom: none; border-top-left-radius: 6px; '
+                '<div style="background-color: #000000; color: #FFFFFF; padding: 6px 10px; '
+                'border: 1px solid #000; border-bottom: none; border-top-left-radius: 6px; '
                 'border-top-right-radius: 6px; font-family: \'Segoe UI\', sans-serif; font-size: 9pt;">'
                 '<span style="font-weight: bold;">PyQGIS Code</span>'
                 '</div>'
             )
-            
+
             code_block = (
-                f'<pre style="margin: 0; background-color: #2b2b2b; color: #a9b7c6; padding: 10px; '
-                'border: 1px solid #555; border-top: none; border-radius: 0; '
+                f'<pre style="margin: 0; background-color: #000000; color: #EEEEEE; padding: 10px; '
+                'border: 1px solid #000; border-top: none; border-radius: 0; '
                 'border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; '
                 'font-family: \'Consolas\', \'Menlo\', \'monospace\'; font-size: 9pt; '
-                f'overflow-x: auto; white-space: pre;"><code>{code_to_display}</code></pre>'
+                f'overflow-x: auto; white-space: pre-wrap; word-break: break-word;"><code>{code_to_display}</code></pre>'
             )
 
             return f'<div style="margin-top: 10px; margin-bottom: 10px;">{header}{code_block}</div>'
@@ -876,42 +1088,7 @@ To use Claude, you need an Anthropic API key:<br>
         # Save any settings if needed
         event.accept()
 
-    def refresh_logs_display(self):
-        """Refresh the full logs and statistics display."""
-        self.full_logs_display.setText(self.pyqgis_executor.get_all_logs_formatted())
-        self.stats_display.setText(self.pyqgis_executor.get_statistics())
-
-    def clear_execution_history(self):
-        """Clear all execution history."""
-        reply = QMessageBox.question(self, 'Confirm Clear History',
-                                     "Are you sure you want to clear all execution history? This cannot be undone.",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.pyqgis_executor.clear_history()
-            self.refresh_logs_display()
-            self.execution_display.clear()
-            QMessageBox.information(self, "Success", "Execution history has been cleared.")
-
-    def export_execution_logs(self):
-        """Export all execution logs to a text file."""
-        logs = self.pyqgis_executor.get_all_logs_formatted()
-        if "No execution logs" in logs:
-            QMessageBox.information(self, "Info", "No logs to export.")
-            return
-
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Logs", "qgis_copilot_logs.txt", "Text Files (*.txt)")
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(logs)
-                QMessageBox.information(self, "Success", f"Logs exported to {os.path.basename(file_path)}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export logs: {e}")
-
-    def show_execution_statistics(self):
-        """Show execution statistics in a message box."""
-        stats = self.pyqgis_executor.get_statistics()
-        QMessageBox.information(self, "Execution Statistics", stats)
+    # Removed: logs tab utilities (refresh, clear history, export, statistics)
 
     def request_manual_improvement(self):
         """Manually trigger a request for AI to improve the last failed code."""

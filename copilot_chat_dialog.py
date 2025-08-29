@@ -156,8 +156,14 @@ class CopilotChatDialog(QDialog):
         self.auto_feedback_cb.setToolTip("Automatically ask AI to improve code when execution fails")
         self.auto_feedback_cb.toggled.connect(self.on_auto_feedback_toggled)
         
+        # Run mode option
+        self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
+        self.run_in_console_cb.setChecked(True)
+        self.run_in_console_cb.setToolTip("Writes code to a temp file, opens it in QGIS Python Editor, and runs using exec(Path(file).read_text()) for native logging/tracebacks.")
+
         options_row2.addWidget(self.include_logs_cb)
         options_row2.addWidget(self.auto_feedback_cb)
+        options_row2.addWidget(self.run_in_console_cb)
         options_row2.addStretch()
         
         options_layout.addLayout(options_row1)
@@ -635,10 +641,24 @@ To use Claude, you need an Anthropic API key:<br>
         self.add_to_execution_results("Executing code from QGIS Copilot response...")
         self.add_to_execution_results("=" * 50)
         
-        self.pyqgis_executor.execute_gemini_response(response)
+        # Choose execution route
+        if self.run_in_console_cb.isChecked():
+            self.pyqgis_executor.execute_response_via_console(response)
+        else:
+            self.pyqgis_executor.execute_gemini_response(response)
 
     def handle_execution_completed(self, result_message, success, execution_log):
         """Handle the completion of a code execution."""
+        # Notify in chat with a brief summary so the user sees outcomes inline
+        summary_color = "#28a745" if success else "#dc3545"
+        status_text = "succeeded" if success else "failed"
+        self.add_to_chat(
+            "System",
+            f"Code execution {status_text}. See 'Live Execution Results' and 'Execution Logs' for details.",
+            summary_color,
+        )
+
+        # If execution failed, optionally trigger auto-feedback
         if not success:
             self.pending_failed_execution = execution_log
             if self.auto_feedback_enabled:
@@ -648,6 +668,8 @@ To use Claude, you need an Anthropic API key:<br>
     def handle_logs_updated(self, formatted_log_entry):
         """Append new log entry to the live display."""
         self.add_to_execution_results(formatted_log_entry)
+        # Keep the 'Execution Logs' tab in sync automatically
+        self.refresh_logs_display()
 
     def handle_improvement_suggestion(self, original_code, suggestion_prompt):
         self.add_to_chat("System", "Requesting improvement for the last failed script...", "#6c757d")
@@ -828,6 +850,9 @@ To use Claude, you need an Anthropic API key:<br>
         """Add message to execution results"""
         cursor = self.execution_display.textCursor()
         cursor.movePosition(QTextCursor.End)
+        # Ensure each message ends with a newline for readability
+        if message and not message.endswith("\n"):
+            message = message + "\n"
         cursor.insertText(message)
         
         self.execution_display.setTextCursor(cursor)

@@ -10,10 +10,14 @@ import time
 from io import StringIO
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
+import tempfile
+import os
+from pathlib import Path
 
 from qgis.core import (
     QgsProject, QgsApplication, QgsMessageLog, Qgis,
-    QgsVectorLayer, QgsRasterLayer, QgsMapLayer, QgsWkbTypes
+    QgsVectorLayer, QgsRasterLayer, QgsMapLayer, QgsWkbTypes,
+    QgsFeature, QgsGeometry, QgsField, QgsPointXY, QgsCoordinateReferenceSystem
 )
 from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant
@@ -45,6 +49,9 @@ class ExecutionLog:
         time_str = self.timestamp.strftime("%H:%M:%S")
         
         log = f"[{time_str}] {status} (execution time: {self.execution_time:.3f}s)\n"
+        
+        if self.code:
+            log += f"CODE:\n{self.code}\n"
         
         if self.output:
             log += f"OUTPUT:\n{self.output}\n"
@@ -87,6 +94,11 @@ class EnhancedPyQGISExecutor(QObject):
             'QgsMapLayer': QgsMapLayer,
             'QgsMessageLog': QgsMessageLog,
             'QgsWkbTypes': QgsWkbTypes,
+            'QgsFeature': QgsFeature,
+            'QgsGeometry': QgsGeometry,
+            'QgsField': QgsField,
+            'QgsPointXY': QgsPointXY,
+            'QgsCoordinateReferenceSystem': QgsCoordinateReferenceSystem,
             'Qgis': Qgis,
             'QVariant': QVariant,
             
@@ -185,6 +197,7 @@ class EnhancedPyQGISExecutor(QObject):
     
     def execute_code(self, code):
         """Execute PyQGIS code safely with detailed logging"""
+        original_code = code
         # Pre-process code to remove redundant/incorrect QGIS imports that the AI might add.
         # The execution environment provides all necessary QGIS modules and classes globally,
         # so these imports are unnecessary and can sometimes be incorrect (e.g., from qgis.core import QVariant).
@@ -217,7 +230,7 @@ class EnhancedPyQGISExecutor(QObject):
         is_safe, safety_msg = self.is_safe_code(code)
         if not is_safe:
             execution_log = ExecutionLog(
-                code=code,
+                code=original_code,
                 success=False,
                 output="",
                 error_msg=f"Execution blocked. {safety_msg}",
@@ -264,7 +277,7 @@ class EnhancedPyQGISExecutor(QObject):
             
             # Create execution log
             execution_log = ExecutionLog(
-                code=code,
+                code=original_code,
                 success=True,
                 output=output_text,
                 execution_time=execution_time
@@ -285,7 +298,7 @@ class EnhancedPyQGISExecutor(QObject):
             
             # Create execution log
             execution_log = ExecutionLog(
-                code=code,
+                code=original_code,
                 success=False,
                 output="",
                 error_msg=error_msg,
@@ -427,6 +440,159 @@ class EnhancedPyQGISExecutor(QObject):
                 self.execution_completed.emit(result_msg, True, separator_log)
             
             self.execute_code(code.strip())
+
+    def execute_response_via_console(self, response_text):
+        """Extract code, write to temp files, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
+        code_blocks = self.extract_code_blocks(response_text)
+
+        if not code_blocks:
+            execution_log = ExecutionLog(
+                code="",
+                success=False,
+                output="",
+                error_msg="No executable code found in the response.",
+                execution_time=0
+            )
+            self.execution_completed.emit(
+                "No executable code found in the response.",
+                False,
+                execution_log
+            )
+            return
+
+        for i, code in enumerate(code_blocks):
+            # Write to temp file
+            try:
+                tmp_dir = tempfile.gettempdir()
+                fname = f"qgis_copilot_{int(time.time()*1000)}_{i+1}.py"
+                fpath = os.path.join(tmp_dir, fname)
+                with open(fpath, 'w', encoding='utf-8') as fh:
+                    fh.write(code.strip())
+
+                # Try to open the Python console and load the script in the editor (best-effort)
+                try:
+                    if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                        self.iface.actionShowPythonDialog().trigger()
+                except Exception as e:
+                    QgsMessageLog.logMessage(f"Could not open Python Console automatically: {e}", "QGIS Copilot", level=Qgis.Warning)
+
+                # Attempt to open in console editor via internal plugin if exposed
+                try:
+                    import qgis.utils as qutils
+                    pc = None
+                    if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                        pc = qutils.plugins.get('PythonConsole')
+                    # Try common method names defensively
+                    for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
+                        if pc and hasattr(pc, meth):
+                            try:
+                                getattr(pc, meth)(fpath)
+                                break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                # Build and run the exec command to mirror console behavior
+                wrapper_cmd = f"from pathlib import Path\nexec(Path(r'{fpath}').read_text())"
+                # Informative preface entry for logs/live panel
+                preface = (
+                    f"Temp script created: {fpath}\n"
+                    f"Executing via:\n{wrapper_cmd}\n"
+                )
+                separator_log = ExecutionLog(
+                    code=f"# File: {fpath}",
+                    success=True,
+                    output=preface,
+                    execution_time=0
+                )
+                self.add_to_history(separator_log)
+                # Execute using the standard executor but bypass import cleanup and keep original code in logs
+                self._execute_raw_with_wrapper(original_code=code, wrapper_code=wrapper_cmd)
+            except Exception as e:
+                err = f"Failed to write or execute temp script: {e}"
+                execution_log = ExecutionLog(
+                    code=code,
+                    success=False,
+                    output="",
+                    error_msg=err,
+                    execution_time=0
+                )
+                self.add_to_history(execution_log)
+                self.execution_completed.emit(err, False, execution_log)
+
+    def _execute_raw_with_wrapper(self, original_code, wrapper_code):
+        """Execute wrapper_code with stdout/stderr capture while logging original_code as CODE."""
+        start_time = time.time()
+
+        # Safety check against dangerous ops based on the original code
+        is_safe, safety_msg = self.is_safe_code(original_code)
+        if not is_safe:
+            execution_log = ExecutionLog(
+                code=original_code,
+                success=False,
+                output="",
+                error_msg=f"Execution blocked. {safety_msg}",
+                execution_time=0
+            )
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(
+                f"Execution blocked. {safety_msg}",
+                False,
+                execution_log
+            )
+            return
+
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        stdout_capture = StringIO()
+        stderr_capture = StringIO()
+        try:
+            sys.stdout = stdout_capture
+            sys.stderr = stderr_capture
+            # Execute the wrapper using a minimally augmented environment
+            env = {'iface': self.iface}
+            exec(wrapper_code, env)
+
+            stdout_output = stdout_capture.getvalue()
+            stderr_output = stderr_capture.getvalue()
+
+            execution_time = time.time() - start_time
+            result = "Code executed successfully.\n"
+            output_text = ""
+            if stdout_output:
+                result += f"Output:\n{stdout_output}\n"
+                output_text += stdout_output
+            if stderr_output:
+                result += f"Warnings/Errors:\n{stderr_output}\n"
+                output_text += f"\nWarnings: {stderr_output}" if stdout_output else stderr_output
+
+            execution_log = ExecutionLog(
+                code=original_code,
+                success=True,
+                output=output_text,
+                execution_time=execution_time
+            )
+            self.add_to_history(execution_log)
+            if self.iface:
+                self.iface.mapCanvas().refresh()
+            self.execution_completed.emit(result, True, execution_log)
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Execution error: {str(e)}\n"
+            error_msg += f"Traceback:\n{traceback.format_exc()}"
+            execution_log = ExecutionLog(
+                code=original_code,
+                success=False,
+                output="",
+                error_msg=error_msg,
+                execution_time=execution_time
+            )
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(error_msg, False, execution_log)
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
     
     def suggest_improvement(self, failed_execution_log):
         """Analyze failed execution and suggest improvements to AI"""

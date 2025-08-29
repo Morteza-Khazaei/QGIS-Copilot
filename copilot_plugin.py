@@ -105,12 +105,12 @@ class QGISCopilotPlugin:
             self.first_start = False
             self.dialog = CopilotChatDialog(self.iface)
 
-        # Check if Gemini API key is configured
-        if not self.dialog.gemini_api.api_key:
+        # Check if any API key is configured
+        if not self.dialog.gemini_api.get_api_key() and not self.dialog.openai_api.get_api_key():
             QMessageBox.information(
                 self.iface.mainWindow(),
                 "Welcome to QGIS Copilot!",
-                "Welcome to QGIS Copilot! To get started, please configure your Google Gemini API key in the Settings tab.\n\nGet your free API key at: https://aistudio.google.com"
+                "Welcome to QGIS Copilot! To get started, please configure an API key (e.g., for Google Gemini or OpenAI) in the Settings tab."
             )
 
         # Show the dialog

@@ -706,13 +706,9 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
     def on_test_ollama_model(self):
         """Test the currently selected Ollama model and show results in Live Logs."""
         try:
-            self.add_to_execution_results("=== Ollama Model Test ===")
+            # Print a single configuration snapshot (matches chat request header)
             try:
-                self.add_to_execution_results(f"Base URL: {self.ollama_api.get_base_url()}")
-            except Exception:
-                pass
-            try:
-                self.add_to_execution_results(f"Model: {self.ollama_api.model}")
+                self.log_provider_and_config()
             except Exception:
                 pass
 

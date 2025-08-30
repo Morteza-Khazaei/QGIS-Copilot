@@ -9,7 +9,7 @@
 [![QGIS](https://img.shields.io/badge/QGIS-3.0+-green.svg)](https://qgis.org)
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Gemini](https://img.shields.io/badge/Powered%20by-Google%20Gemini-orange.svg)](https://ai.google.dev)
+[![Providers](https://img.shields.io/badge/AI%20Providers-Ollama%20%7C%20OpenAI%20%7C%20Gemini%20%7C%20Claude-blue.svg)](#-ai-tab-overview)
 
 **Chat with QGIS in natural language • Execute PyQGIS code safely • Boost your GIS productivity**
 
@@ -32,9 +32,11 @@ QGIS Copilot is your intelligent GIS assistant that transforms how you work with
 - **🧠 Context Aware**: Understands your current project, layers, and data
 - **⚡ Code Generation**: Generates and executes PyQGIS code automatically
 - **🛡️ Safe Execution**: Built-in security prevents dangerous operations
-- **💻 Modern UI**: Clean, intuitive chat interface with syntax highlighting
-- **🔄 Real-time Results**: See code execution results immediately
+- **💻 Modern UI**: Clean, intuitive chat interface with markdown rendering and code highlighting
+- **🔄 Real-time Results**: See Python execution logs in a terminal-style panel
 - **📊 Smart Context**: Knows about your layers, CRS, extents, and more
+- **🧩 Multiple Providers**: Google Gemini, OpenAI, Anthropic Claude, and Ollama (Local) — Ollama is the default
+- **🧪 One‑click Model Tests**: Validate Ollama models from the AI tab
 
 ---
 
@@ -44,8 +46,9 @@ QGIS Copilot is your intelligent GIS assistant that transforms how you work with
 
 - QGIS 3.0 or higher
 - Python 3.6+
-- Internet connection
-- Google Gemini API key (free from [Google AI Studio](https://aistudio.google.com))
+- Internet connection (for cloud providers)
+- Optional: Google/OpenAI/Anthropic API key(s) for cloud providers
+- Optional: Ollama for local, offline models (no API key)
 
 ### 📦 Installation
 
@@ -66,8 +69,27 @@ QGIS Copilot is your intelligent GIS assistant that transforms how you work with
 
 5. **Configure QGIS Copilot**:
    - Click the QGIS Copilot icon 💬
-   - Go to Settings tab
-   - Enter your API key and test the connection
+   - Go to the AI tab
+   - Choose an AI provider (Ollama is default and requires no API key)
+   - For cloud providers, enter and test your API key
+
+### 🖥️ Local Ollama Setup (Default)
+
+Ollama runs models locally — no API key needed.
+
+1. Install Ollama from https://ollama.ai
+2. Start the daemon: `ollama serve`
+3. Pull a model, e.g.: `ollama pull llama3.1:8b`
+4. Verify models: `curl http://localhost:11434/api/tags`
+5. Quick chat test (optional):
+   - `curl http://localhost:11434/api/chat -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"why is the sky blue?"}]}'`
+
+In QGIS Copilot → AI tab → Provider = “Ollama (Local)”:
+- Base URL defaults to `http://localhost:11434` (changeable)
+- Click “Refresh Models” to populate available models
+- Select a model and click “Test Selected Model” to confirm it responds
+
+Logs panel shows a configuration snapshot (provider, model, base URL, prompt file, preferences, workspace) before requests. API responses are shown only in chat (keeps logs clean).
 
 ### 🎯 First Steps
 
@@ -78,6 +100,24 @@ QGIS Copilot is your intelligent GIS assistant that transforms how you work with
 ---
 
 ## 📖 Documentation
+
+### ⚙️ AI Tab Overview
+
+- **Provider**: Choose Ollama (Local), OpenAI ChatGPT, Google Gemini, or Anthropic Claude.
+- **Ollama Configuration**: Base URL, Check Connection (diagnostic), Refresh Models.
+- **Model Settings**: Model picker + “Test Selected Model” (for Ollama).
+- **System Prompt**: Stored in a Markdown file; use “Change…” and “Open File”.
+- **Logs Behavior**: Live Logs panel shows provider/config snapshots and Python execution logs — not API responses.
+
+#### Provider specifics
+- `Ollama (Local)`: no API key; ensure daemon at `http://localhost:11434`. Use “Refresh Models” and “Test Selected Model”.
+- `OpenAI ChatGPT`: add an API key; pick a model (e.g., `gpt-4o`). Test your key from the AI tab.
+- `Google Gemini`: add an API key; pick a model (e.g., `gemini-1.5-pro`). Test your key from the AI tab.
+- `Anthropic Claude`: add an API key; pick a model (e.g., `claude-3-5-sonnet`). Test your key from the AI tab.
+
+### 📝 Markdown Responses
+
+Agent responses render markdown in the chat, including headings, lists, links, and fenced code blocks with PyQGIS‑friendly styling.
 
 ### 🎯 Examples
 
@@ -130,6 +170,19 @@ Here are some things you can ask your QGIS Copilot:
 - **Review code**: Always check generated code before execution
 - **Start simple**: Begin with basic requests and build up complexity
 
+### 🧪 Troubleshooting Ollama
+
+- Ensure the daemon is running: `ollama serve`
+- Pull a chat‑capable model (e.g., `llama3.1:8b`) and click “Refresh Models”
+- Use “Check Connection” to run a diagnostic (lists models and performs a chat test)
+- Verify with curl:
+  - List: `curl http://localhost:11434/api/tags`
+  - Chat: `curl http://localhost:11434/api/chat -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Connection test successful!"}]}'`
+
+For an in‑QGIS diagnostic:
+- `from QGIS_Copilot.ollama_connectivity_diagnostic import run_diagnostic`
+- `run_diagnostic()`
+
 ---
 
 ## 🏗️ Architecture
@@ -145,10 +198,11 @@ Here are some things you can ask your QGIS Copilot:
 │  ├── Context-Aware Responses                               │
 │  └── Syntax-Highlighted Code Display                       │
 ├─────────────────────────────────────────────────────────────┤
-│  Gemini AI Integration                                      │
-│  ├── Google Gemini API                                     │
-│  ├── Context Processing                                     │
-│  └── Response Generation                                    │
+│  AI Provider Integrations                                   │
+│  ├── Ollama (Local) — local daemon via REST                 │
+│  ├── OpenAI ChatGPT — REST API                              │
+│  ├── Google Gemini — REST API                               │
+│  └── Anthropic Claude — REST API                            │
 ├─────────────────────────────────────────────────────────────┤
 │  PyQGIS Code Executor                                       │
 │  ├── Safe Code Validation                                  │
@@ -166,15 +220,20 @@ Here are some things you can ask your QGIS Copilot:
 
 ```
 qgis_copilot/
-├── 📄 __init__.py                  # Plugin initialization
-├── 🧠 copilot_plugin.py            # Main plugin class
-├── 💬 copilot_chat_dialog.py       # User interface
-├── 🌐 gemini_api.py                # Gemini AI integration
-├── ⚡ pyqgis_executor.py           # Code execution engine
-├── 📋 metadata.txt                 # Plugin metadata
-├── 🖼️ icon.png                     # Plugin icon
-├── 📚 README.md                    # This file
-└── 📜 LICENSE                      # MIT License
+├── 📄 __init__.py                         # Plugin initialization
+├── 🧠 copilot_plugin.py                   # Main plugin class
+├── 💬 copilot_chat_dialog.py              # User interface (AI tab, chat, logs)
+├── 🌐 gemini_api.py                       # Google Gemini integration
+├── 🌐 openai_api.py                       # OpenAI ChatGPT integration
+├── 🌐 claude_api.py                       # Anthropic Claude integration
+├── 🖥️ ollama_api.py                       # Ollama (Local) integration
+├── 🧪 ollama_connectivity_diagnostic.py   # Optional diagnostic helper
+├── ⚡ pyqgis_executor.py                  # Code execution engine
+├── 📄 system_prompt.md                    # Agent system prompt (markdown)
+├── 📋 metadata.txt                        # Plugin metadata
+├── 🖼️ icon.png                            # Plugin icon
+├── 📚 README.md                           # This file
+└── 📜 LICENSE                             # MIT License
 ```
 
 ---

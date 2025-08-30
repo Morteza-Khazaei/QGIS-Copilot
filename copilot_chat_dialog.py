@@ -94,6 +94,8 @@ class CopilotChatDialog(QDialog):
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self.request_ai_improvement)
         self.pending_failed_execution = None
+        # Track save-prompting per task file
+        self._last_prompted_task_file = None
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -817,7 +819,11 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         path = settings.value("qgis_copilot/system_prompt_file", type=str)
         if not path:
             plugin_root = os.path.dirname(__file__)
-            path = os.path.join(plugin_root, "system_prompt.md")
+            # Default to the root prompt file maintained with the plugin (prefer v3.5)
+            candidate = os.path.join(plugin_root, "qgis_agent_v3.5.md")
+            if not os.path.exists(candidate):
+                candidate = os.path.join(plugin_root, "qgis_agent_v3.4.md")
+            path = candidate
             settings.setValue("qgis_copilot/system_prompt_file", path)
 
         # Ensure the file exists; if not, seed from any saved setting or default
@@ -885,7 +891,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         path = settings.value("qgis_copilot/system_prompt_file", type=str)
         if not path:
             plugin_root = os.path.dirname(__file__)
-            path = os.path.join(plugin_root, "system_prompt.md")
+            candidate = os.path.join(plugin_root, "qgis_agent_v3.5.md")
+            if not os.path.exists(candidate):
+                candidate = os.path.join(plugin_root, "qgis_agent_v3.4.md")
+            path = candidate
             settings.setValue("qgis_copilot/system_prompt_file", path)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1161,11 +1170,22 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.add_to_execution_results("Executing code from QGIS Copilot response...")
         self.add_to_execution_results("=" * 50)
         
+        # Derive a filename hint from the last user message (task name)
+        filename_hint = None
+        try:
+            for item in reversed(self.chat_history):
+                if item.get('sender') == 'You':
+                    # Use up to 80 chars of the user message as the filename hint
+                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                    break
+        except Exception:
+            filename_hint = None
+        
         # Choose execution route
         if self.run_in_console_cb.isChecked():
-            self.pyqgis_executor.execute_response_via_console(response)
+            self.pyqgis_executor.execute_response_via_console(response, filename_hint=filename_hint)
         else:
-            self.pyqgis_executor.execute_gemini_response(response)
+            self.pyqgis_executor.execute_gemini_response(response, filename_hint=filename_hint)
 
     def handle_execution_completed(self, result_message, success, execution_log):
         """Handle the completion of a code execution."""
@@ -1184,6 +1204,43 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             if self.auto_feedback_enabled:
                 # Delay to allow user to see the error before AI responds
                 self.feedback_timer.start(1500)
+        else:
+            # On success, offer to save the script under a task-based name once per task
+            try:
+                current_file = self.pyqgis_executor.get_current_task_file()
+            except Exception:
+                current_file = None
+            if current_file and current_file != self._last_prompted_task_file:
+                # Derive a suggested name from the last user message
+                suggested = "qgis_task"
+                try:
+                    for item in reversed(self.chat_history):
+                        if item.get('sender') == 'You':
+                            suggested = (item.get('message') or '').strip().splitlines()[0][:80]
+                            break
+                except Exception:
+                    pass
+                # Slugify preview (UI only)
+                try:
+                    import re as _re
+                    preview = _re.sub(r"[^A-Za-z0-9]+", "_", suggested).strip('_') or 'qgis_task'
+                except Exception:
+                    preview = 'qgis_task'
+                reply = QMessageBox.question(
+                    self,
+                    'Save Task Script',
+                    f"Do you want to save the script under this name in the workspace?\n\n{preview}.py",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    try:
+                        dest = self.pyqgis_executor.finalize_task_as(suggested)
+                        QMessageBox.information(self, "Saved", f"Script saved as:\n{dest}")
+                    except Exception as e:
+                        QMessageBox.warning(self, "Save Failed", f"Could not save script: {e}")
+                # Mark that we prompted for this task file
+                self._last_prompted_task_file = current_file
 
     def handle_logs_updated(self, formatted_log_entry):
         """Append new log entry to the live display."""
@@ -1300,6 +1357,11 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             pass
         try:
             self.pyqgis_executor.clear_history()
+        except Exception:
+            pass
+        # Reset sticky task file so next task uses a new filename
+        try:
+            self.pyqgis_executor.reset_task_file()
         except Exception:
             pass
 

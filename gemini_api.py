@@ -28,8 +28,23 @@ class GeminiAPI(QObject):
         self.model = self.settings.value("qgis_copilot/gemini_model", self.AVAILABLE_MODELS[0])
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
         
-        # System prompt for PyQGIS context - Based on PyQGIS Developer Cookbook
-        self.system_prompt = """
+        # Load system prompt from plugin root, prefer v3.5 then v3.4
+        try:
+            import os
+            plugin_root = os.path.dirname(__file__)
+            loaded = False
+            for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
+                prompt_path = os.path.join(plugin_root, fname)
+                if os.path.exists(prompt_path):
+                    with open(prompt_path, "r", encoding="utf-8") as f:
+                        self.system_prompt = f.read()
+                    loaded = True
+                    break
+            if not loaded:
+                raise FileNotFoundError("No agent prompt file found")
+        except Exception:
+            # Minimal fallback if file missing; do not embed full agent here
+            self.system_prompt = """
 You are QGIS Copilot, an expert PyQGIS developer assistant with comprehensive knowledge of the QGIS PyQGIS Developer Cookbook (https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/index.html).
 
 You specialize in all areas covered by the PyQGIS Cookbook:

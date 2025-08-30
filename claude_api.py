@@ -27,8 +27,16 @@ class ClaudeAPI(QObject):
         self.model = self.settings.value("qgis_copilot/claude_model", self.AVAILABLE_MODELS[1])  # Sonnet as default
         self.base_url = "https://api.anthropic.com/v1"
 
-        # System prompt for PyQGIS context (mirrors other APIs)
-        self.system_prompt = """
+        # Load system prompt from fixed markdown file in plugin root
+        try:
+            import os
+            plugin_root = os.path.dirname(__file__)
+            prompt_path = os.path.join(plugin_root, "qgis_agent_v3.5.md")
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                self.system_prompt = f.read()
+        except Exception:
+            # Fallback to bundled default if file missing
+            self.system_prompt = """
 You are QGIS Copilot, an expert PyQGIS developer assistant with comprehensive knowledge of the QGIS PyQGIS Developer Cookbook (https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/index.html).
 
 You specialize in all areas covered by the PyQGIS Cookbook:

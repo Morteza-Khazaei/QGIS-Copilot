@@ -4,6 +4,7 @@ and feedback loop for AI improvements
 """
 
 import re
+import shutil
 import sys
 import traceback
 import time
@@ -76,6 +77,8 @@ class EnhancedPyQGISExecutor(QObject):
         self.iface = iface
         self.execution_history = []  # Store ExecutionLog objects
         self.max_history = 50  # Keep last 50 executions
+        # Sticky task file path for iterative improvements until reset
+        self._current_task_file = None
         self.setup_execution_environment()
     
     def setup_execution_environment(self):
@@ -409,8 +412,74 @@ class EnhancedPyQGISExecutor(QObject):
         self.execution_history.clear()
         self.logs_updated.emit("Execution history cleared.\n")
     
-    def execute_gemini_response(self, response_text):
-        """Extract and execute code from QGIS Copilot response"""
+    def _slugify(self, text: str, default: str = "qgis_task") -> str:
+        """Create a filesystem-friendly slug from text."""
+        try:
+            text = (text or "").strip().lower()
+            if not text:
+                return default
+            # Replace non-alphanumerics with underscores
+            text = re.sub(r"[^a-z0-9]+", "_", text)
+            # Collapse duplicates and trim
+            text = re.sub(r"_+", "_", text).strip("_")
+            return text or default
+        except Exception:
+            return default
+
+    def _build_task_filepath(self, workspace_dir: str, filename_hint: str = None) -> str:
+        """Build a stable task file path (no timestamp) from hint.
+
+        The file remains the same across iterations until reset_task_file() is called.
+        """
+        slug = self._slugify(filename_hint or "qgis_task")
+        return os.path.join(workspace_dir, f"{slug}.py")
+
+    def _ensure_task_file(self, filename_hint: str = None) -> str:
+        """Return the sticky task file path, creating/setting it if needed."""
+        if self._current_task_file and isinstance(self._current_task_file, str):
+            return self._current_task_file
+        workspace_dir = self.get_workspace_dir()
+        fpath = self._build_task_filepath(workspace_dir, filename_hint)
+        # Set sticky file; creation happens on first write
+        self._current_task_file = fpath
+        return fpath
+
+    def reset_task_file(self):
+        """Clear the sticky task file so the next run can choose a new one."""
+        self._current_task_file = None
+
+    def get_current_task_file(self):
+        """Return the current sticky task file path, if any."""
+        return self._current_task_file
+
+    def finalize_task_as(self, filename_slug: str) -> str:
+        """Copy the current task file to a final named file in the workspace.
+
+        Returns the destination path. Raises if no current task file exists.
+        """
+        if not self._current_task_file or not os.path.exists(self._current_task_file):
+            raise FileNotFoundError("No current task file to save.")
+        workspace = self.get_workspace_dir()
+        base_slug = self._slugify(filename_slug or "qgis_task")
+        dest = os.path.join(workspace, f"{base_slug}.py")
+        # Avoid overwriting: append numeric suffix
+        if os.path.exists(dest):
+            i = 1
+            while True:
+                alt = os.path.join(workspace, f"{base_slug}_{i}.py")
+                if not os.path.exists(alt):
+                    dest = alt
+                    break
+                i += 1
+        shutil.copyfile(self._current_task_file, dest)
+        return dest
+
+    def execute_gemini_response(self, response_text, filename_hint: str = None):
+        """Extract, save, and execute code from QGIS Copilot response.
+
+        If multiple fenced code blocks are present, merge them into a single
+        script to keep a single runnable output per response.
+        """
         code_blocks = self.extract_code_blocks(response_text)
         
         if not code_blocks:
@@ -428,6 +497,23 @@ class EnhancedPyQGISExecutor(QObject):
             )
             return
         
+        # Save merged code for this task under a distinct filename
+        try:
+            fpath = self._ensure_task_file(filename_hint)
+            merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
+            with open(fpath, 'w', encoding='utf-8') as fh:
+                fh.write(merged)
+            # Log save event
+            saved_log = ExecutionLog(
+                code=f"# File saved: {fpath}",
+                success=True,
+                output=f"Saved task script to: {fpath}",
+                execution_time=0,
+            )
+            self.add_to_history(saved_log)
+        except Exception:
+            pass
+
         # Execute each code block
         for i, code in enumerate(code_blocks):
             if len(code_blocks) > 1:
@@ -443,8 +529,8 @@ class EnhancedPyQGISExecutor(QObject):
             
             self.execute_code(code.strip())
 
-    def execute_response_via_console(self, response_text):
-        """Extract code, write to a single workspace script, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
+    def execute_response_via_console(self, response_text, filename_hint: str = None):
+        """Extract code, write to a task-named script, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
         code_blocks = self.extract_code_blocks(response_text)
 
         if not code_blocks:
@@ -471,8 +557,7 @@ class EnhancedPyQGISExecutor(QObject):
 
         # Write to a stable file path in the workspace
         try:
-            workspace_dir = self.get_workspace_dir()
-            fpath = os.path.join(workspace_dir, "qgis_copilot_script.py")
+            fpath = self._ensure_task_file(filename_hint)
             compat_header = (
                 "# QGIS Copilot compatibility header (QVariant shim for QGIS 3)\n"
                 "try:\n"

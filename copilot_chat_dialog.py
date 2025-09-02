@@ -22,6 +22,7 @@ from .openai_api import OpenAIAPI
 from .claude_api import ClaudeAPI
 from .ollama_api import OllamaAPI
 from .pyqgis_executor import EnhancedPyQGISExecutor
+from . import web_kb
 
 
 class CopilotChatDialog(QDialog):
@@ -96,6 +97,8 @@ class CopilotChatDialog(QDialog):
         self.pending_failed_execution = None
         # Track save-prompting per task file
         self._last_prompted_task_file = None
+        # Track last saved script path for Execute Last Code
+        self._last_saved_task_path = None
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -326,10 +329,20 @@ class CopilotChatDialog(QDialog):
         grid.addWidget(self.auto_execute_cb, 0, 1)
         grid.addWidget(self.auto_feedback_cb, 1, 1)
 
+        # Advanced: Relax safety checks (dangerous)
+        self.relaxed_safety_cb = QCheckBox("Relax Safety Checks (advanced)")
+        self.relaxed_safety_cb.setToolTip("Allows more operations in generated scripts (still blocks exec/eval/subprocess). Use with caution.")
+        grid.addWidget(self.relaxed_safety_cb, 2, 1)
+
         # Console execution option spans both columns
         self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
         self.run_in_console_cb.setToolTip("Writes code to a file in your Workspace, opens it in the QGIS Python Editor, then executes it for native logging/tracebacks.")
-        grid.addWidget(self.run_in_console_cb, 2, 0, 1, 2)
+        grid.addWidget(self.run_in_console_cb, 3, 0, 1, 2)
+
+        # Include docs summary option
+        self.include_docs_cb = QCheckBox("Include PyQGIS Docs Summary in Context")
+        self.include_docs_cb.setToolTip("Scrapes the PyQGIS Developer Cookbook and adds a brief, relevant summary to the AI context.")
+        grid.addWidget(self.include_docs_cb, 4, 0, 1, 2)
 
         prefs_layout.addLayout(grid)
         prefs_group.setLayout(prefs_layout)
@@ -796,6 +809,32 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             else:
                 context = log_context
 
+        # Add tool-identification guidance
+        try:
+            guidance = (
+                "Tool Identification: First list the relevant PyQGIS classes, functions, "
+                "and processing algorithms needed for this task and why. Then implement the simplest, "
+                "most direct approach as a single complete Python script."
+            )
+            if context:
+                context = guidance + "\n\n" + context
+            else:
+                context = guidance
+        except Exception:
+            pass
+
+        # Add docs summary if requested
+        if self.include_docs_cb.isChecked():
+            try:
+                summary = web_kb.get_relevant_summary(message)
+                if summary:
+                    if context:
+                        context += "\n\n" + summary
+                    else:
+                        context = summary
+            except Exception:
+                pass
+
         # Log provider and key config details before sending
         try:
             self.log_provider_and_config()
@@ -862,6 +901,8 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.auto_execute_cb.setChecked(settings.value("qgis_copilot/prefs/auto_execute", False, type=bool))
         self.auto_feedback_cb.setChecked(settings.value("qgis_copilot/prefs/auto_feedback", False, type=bool))
         self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", True, type=bool))
+        self.relaxed_safety_cb.setChecked(settings.value("qgis_copilot/prefs/relaxed_safety", False, type=bool))
+        self.include_docs_cb.setChecked(settings.value("qgis_copilot/prefs/include_docs", True, type=bool))
         self.auto_feedback_enabled = self.auto_feedback_cb.isChecked()
 
         # Persist on change
@@ -870,6 +911,8 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.auto_execute_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/auto_execute", v))
         self.auto_feedback_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/auto_feedback", v))
         self.run_in_console_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/run_in_console", v))
+        self.relaxed_safety_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/relaxed_safety", v))
+        self.include_docs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_docs", v))
 
     def load_workspace_dir(self):
         """Load the workspace directory from settings into the UI."""
@@ -1059,6 +1102,22 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.last_response = response
         self.execute_button.setEnabled(True)
         
+        # Save the response code to a sticky workspace script so Execute Last Code can run it
+        try:
+            # Derive filename hint from last user message
+            filename_hint = None
+            for item in reversed(self.chat_history):
+                if item.get('sender') == 'You':
+                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                    break
+            saved_path = self.pyqgis_executor.save_response_to_task_file(response, filename_hint=filename_hint)
+            self._last_saved_task_path = saved_path
+            # Brief notice in logs panel
+            self.add_to_execution_results(f"Saved response script: {saved_path}")
+        except Exception:
+            # Ignore if no code found; user can still execute normally
+            pass
+        
         # Do not mirror API responses to the Live Logs panel
 
         # Auto-execute if enabled
@@ -1159,6 +1218,14 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
     
     def execute_last_code(self):
         """Execute code from the last response"""
+        # Prefer running the last saved script from the workspace
+        try:
+            if self._last_saved_task_path and os.path.exists(self._last_saved_task_path):
+                self.add_to_execution_results(f"Executing saved script: {self._last_saved_task_path}")
+                self.pyqgis_executor.execute_task_file(self._last_saved_task_path)
+                return
+        except Exception:
+            pass
         if hasattr(self, 'last_response'):
             self.execute_code_from_response(self.last_response)
         else:

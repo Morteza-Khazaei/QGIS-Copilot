@@ -165,41 +165,55 @@ class EnhancedPyQGISExecutor(QObject):
         return code_blocks
     
     def is_safe_code(self, code):
-        """Check if code is safe to execute"""
-        # List of potentially dangerous operations
-        disallowed_patterns = [
-            (r'import\s+os', "Importing 'os' is not allowed for security reasons."),
-            (r'import\s+subprocess', "Importing 'subprocess' is not allowed for security reasons."),
-            (r'import\s+sys', "Importing 'sys' is not allowed. Use the provided environment."),
-            (r'from\s+os', "Importing from 'os' is not allowed."),
-            (r'from\s+subprocess', "Importing from 'subprocess' is not allowed."),
-            (r'\bexec\s*\(', "Use of 'exec' is not allowed."),
-            (r'\beval\s*\(', "Use of 'eval' is not allowed."),
-            (r'__import__', "Use of '__import__' is not allowed."),
-            (r'open\s*\(', "File I/O with 'open' is not allowed."),
-            (r'file\s*\(', "File I/O with 'file' is not allowed."),
-            (r'\bcompile\s*\(', "Use of 'compile' is not allowed."),
-            (r'\bglobals\s*\(', "Accessing 'globals()' is not allowed."),
-            (r'\blocals\s*\(', "Accessing 'locals()' is not allowed."),
-            (r'\bvars\s*\(', "Accessing 'vars()' is not allowed."),
-            (r'\bdir\s*\(', "Use of 'dir()' is not allowed."),
-            (r'\bdelattr\s*\(', "Use of 'delattr' is not allowed."),
-            (r'\bsetattr\s*\(', "Use of 'setattr' is not allowed."),
-            (r'\bhasattr\s*\(', "Use of 'hasattr' is not allowed."),
-            (r'\breload\s*\(', "Use of 'reload' is not allowed."),
-            (r'\binput\s*\(', "Use of 'input()' is not allowed for security."),
-            (r'\braw_input\s*\(', "Use of 'raw_input()' is not allowed for security."),
-            (r'\.system\s*\(', "Calling 'system' is not allowed."),
-            (r'\.popen\s*\(', "Calling 'popen' is not allowed."),
-            (r'\.call\s*\(', "Calling 'call' is not allowed."),
-        ]
-        
+        """Check if code is safe to execute (supports relaxed mode)."""
+        # Read relaxed mode preference
+        try:
+            relaxed = QSettings().value("qgis_copilot/prefs/relaxed_safety", False, type=bool)
+        except Exception:
+            relaxed = False
+
+        if relaxed:
+            disallowed_patterns = [
+                (r'\bexec\s*\(', "Use of 'exec' is not allowed."),
+                (r'\beval\s*\(', "Use of 'eval' is not allowed."),
+                (r'__import__', "Use of '__import__' is not allowed."),
+                (r'import\s+subprocess', "'subprocess' is not allowed."),
+                (r'from\s+subprocess', "'subprocess' is not allowed."),
+                (r'\.(system|popen|call)\s*\(', "Shell/system calls are not allowed."),
+            ]
+        else:
+            # Strict, default protections
+            disallowed_patterns = [
+                (r'import\s+os', "Importing 'os' is not allowed for security reasons."),
+                (r'import\s+subprocess', "Importing 'subprocess' is not allowed for security reasons."),
+                (r'import\s+sys', "Importing 'sys' is not allowed. Use the provided environment."),
+                (r'from\s+os', "Importing from 'os' is not allowed."),
+                (r'from\s+subprocess', "Importing from 'subprocess' is not allowed."),
+                (r'\bexec\s*\(', "Use of 'exec' is not allowed."),
+                (r'\beval\s*\(', "Use of 'eval' is not allowed."),
+                (r'__import__', "Use of '__import__' is not allowed."),
+                (r'open\s*\(', "File I/O with 'open' is not allowed."),
+                (r'file\s*\(', "File I/O with 'file' is not allowed."),
+                (r'\bcompile\s*\(', "Use of 'compile' is not allowed."),
+                (r'\bglobals\s*\(', "Accessing 'globals()' is not allowed."),
+                (r'\blocals\s*\(', "Accessing 'locals()' is not allowed."),
+                (r'\bvars\s*\(', "Accessing 'vars()' is not allowed."),
+                (r'\bdir\s*\(', "Use of 'dir()' is not allowed."),
+                (r'\bdelattr\s*\(', "Use of 'delattr' is not allowed."),
+                (r'\bsetattr\s*\(', "Use of 'setattr' is not allowed."),
+                (r'\bhasattr\s*\(', "Use of 'hasattr' is not allowed."),
+                (r'\breload\s*\(', "Use of 'reload' is not allowed."),
+                (r'\binput\s*\(', "Use of 'input()' is not allowed for security."),
+                (r'\braw_input\s*\(', "Use of 'raw_input()' is not allowed for security."),
+                (r'\.(system|popen|call)\s*\(', "Shell/system calls are not allowed."),
+            ]
+
         for pattern, msg in disallowed_patterns:
             if re.search(pattern, code, re.IGNORECASE):
                 return False, f"Disallowed operation: {msg}"
-        
+
         return True, "Code appears safe"
-    
+
     def execute_code(self, code):
         """Execute PyQGIS code safely with detailed logging"""
         original_code = code
@@ -473,6 +487,91 @@ class EnhancedPyQGISExecutor(QObject):
                 i += 1
         shutil.copyfile(self._current_task_file, dest)
         return dest
+
+    def save_response_to_task_file(self, response_text: str, filename_hint: str = None) -> str:
+        """Merge response code blocks and save to the sticky task file.
+
+        Returns the saved file path. Raises on failure.
+        """
+        code_blocks = self.extract_code_blocks(response_text)
+        if not code_blocks:
+            raise ValueError("No executable code found in the response.")
+        fpath = self._ensure_task_file(filename_hint)
+        merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
+        with open(fpath, 'w', encoding='utf-8') as fh:
+            fh.write(merged)
+        # Log save event
+        saved_log = ExecutionLog(
+            code=f"# File saved: {fpath}",
+            success=True,
+            output=f"Saved task script to: {fpath}",
+            execution_time=0,
+        )
+        self.add_to_history(saved_log)
+        return fpath
+
+    def execute_task_file(self, file_path: str):
+        """Execute a script from the given file path via wrapper (reads file at runtime)."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as fh:
+                original_code = fh.read()
+        except Exception as e:
+            err = f"Failed to read script file: {e}"
+            execution_log = ExecutionLog(
+                code="",
+                success=False,
+                output="",
+                error_msg=err,
+                execution_time=0
+            )
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(err, False, execution_log)
+            return
+
+        # Best-effort: Open the script in the QGIS Python Console editor
+        try:
+            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                self.iface.actionShowPythonDialog().trigger()
+        except Exception:
+            pass
+        try:
+            import qgis.utils as qutils
+            pc = None
+            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                pc = qutils.plugins.get('PythonConsole')
+            for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
+                if pc and hasattr(pc, meth):
+                    try:
+                        getattr(pc, meth)(file_path)
+                        break
+                    except Exception:
+                        pass
+            # Best-effort: try to directly execute the script from the console plugin
+            for run_meth in ('runScriptFile', 'execScriptFile', 'executeScriptFile', 'runFile'):
+                if pc and hasattr(pc, run_meth):
+                    try:
+                        getattr(pc, run_meth)(file_path)
+                        break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        wrapper_cmd = (
+            "from pathlib import Path\n"
+            "import qgis\n"
+            "from qgis.PyQt.QtCore import QVariant as _QVariant\n"
+            "import qgis.core as _qcore\n"
+            "setattr(_qcore, 'QVariant', _QVariant)\n"
+            f"__code__ = Path(r'{file_path}').read_text()\n"
+            f"exec(compile(__code__, r'{file_path}', 'exec'), globals())"
+        )
+        preface = (
+            f"Executing saved script: {file_path}\n"
+        )
+        notice_log = ExecutionLog(code=f"# File: {file_path}", success=True, output=preface, execution_time=0)
+        self.add_to_history(notice_log)
+        self._execute_raw_with_wrapper(original_code=original_code, wrapper_code=wrapper_cmd)
 
     def execute_gemini_response(self, response_text, filename_hint: str = None):
         """Extract, save, and execute code from QGIS Copilot response.

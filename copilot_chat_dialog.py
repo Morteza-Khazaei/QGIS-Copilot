@@ -207,17 +207,6 @@ class CopilotChatDialog(QDialog):
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self.send_message)
         
-        self.execute_button = QToolButton()
-        self.execute_button.setText("Run")
-        self.execute_button.setToolTip("Run the last generated script")
-        self.execute_button.setPopupMode(QToolButton.MenuButtonPopup)
-        run_menu = QMenu(self.execute_button)
-        open_action = run_menu.addAction("Open in Editor")
-        open_action.triggered.connect(self.on_open_in_editor)
-        self.execute_button.setMenu(run_menu)
-        self.execute_button.clicked.connect(self.execute_last_code)
-        self.execute_button.setEnabled(False)
-        
         # Retry button: disabled until a failure happens
         self.retry_button = QPushButton("Retry")
         self.retry_button.clicked.connect(self.on_retry_clicked)
@@ -230,7 +219,6 @@ class CopilotChatDialog(QDialog):
         input_layout.addWidget(self.message_input)
         input_layout.addWidget(self.send_button)
         input_layout.addWidget(self.retry_button)
-        input_layout.addWidget(self.execute_button)
         
         chat_layout.addLayout(input_layout)
         
@@ -1179,7 +1167,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         
         # Store last response for potential execution
         self.last_response = response
-        self.execute_button.setEnabled(True)
+        # Standalone Run button removed; per-code-block Run is available in the response
         
         # Save the response code to a sticky workspace script so Execute Last Code can run it
         try:
@@ -1295,20 +1283,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         QgsMessageLog.logMessage(f"QGIS Copilot API Error ({self.current_api_name}): {error}", "QGIS Copilot", level=Qgis.Critical)
         # Do not mirror API errors to the Live Logs panel
     
-    def execute_last_code(self):
-        """Execute code from the last response"""
-        # Prefer running the last saved script from the workspace
-        try:
-            if self._last_saved_task_path and os.path.exists(self._last_saved_task_path):
-                self.add_to_execution_results(f"Executing saved script: {self._last_saved_task_path}")
-                self.pyqgis_executor.execute_task_file(self._last_saved_task_path)
-                return
-        except Exception:
-            pass
-        if hasattr(self, 'last_response'):
-            self.execute_code_from_response(self.last_response)
-        else:
-            QMessageBox.information(self, "Info", "No code to execute. Send a message first.")
+    # Removed: execute_last_code — replaced by per-code-block Run actions in chat
     
     def execute_code_from_response(self, response):
         """Execute code blocks found in the response"""
@@ -1422,13 +1397,27 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             if sender not in ("You", "System"):
                 if not hasattr(self, '_code_blocks_by_msg'):
                     self._code_blocks_by_msg = {}
-                blocks = self.pyqgis_executor.extract_code_blocks(message)
+                # Use auto-fenced markdown so unfenced scripts are detected as blocks
+                fenced = None
+                try:
+                    fenced = self.auto_fence_code_blocks(message)
+                except Exception:
+                    fenced = message
+                blocks = self.pyqgis_executor.extract_code_blocks(fenced or message)
                 self._code_blocks_by_msg[msg_id] = blocks or []
         except Exception:
             pass
         
-        # Add to display
+        # Add to display with explicit message id available for header actions
+        try:
+            self._current_render_msg_id = msg_id
+        except Exception:
+            pass
         self.render_message(sender, message, color, timestamp)
+        try:
+            del self._current_render_msg_id
+        except Exception:
+            pass
 
     def render_message(self, sender, message, color, timestamp):
         """Render a single chat message using Qt's native Markdown support when appropriate."""
@@ -1472,14 +1461,8 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 temp_doc.setMarkdown(message_md)
                 html_content = temp_doc.toHtml()
                 html_content = self.extract_body_content(html_content)
-                # If this is an AI message, attach per-code-block actions
-                mid = None
-                try:
-                    # Lookup last inserted history id
-                    if len(self.chat_history) > 0:
-                        mid = self.chat_history[-1].get('id')
-                except Exception:
-                    mid = None
+                # If this is an AI message, attach per-code-block actions using current message id
+                mid = getattr(self, '_current_render_msg_id', None)
                 formatted_content = self.style_markdown_html(html_content, mid=mid)
             except Exception:
                 formatted_content = None
@@ -1760,13 +1743,12 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     open_href = f"copilot://open?mid={mid}&i={idx}"
                     copy_href = f"copilot://copy?mid={mid}&i={idx}"
                     actions = (
-                        f'<span style="float:right; font-weight:normal;">'
+                        f' &nbsp;·&nbsp; '
                         f'<a href="{run_href}" style="color:#8fd19e; text-decoration:none;">Run</a>'
                         f' &nbsp;·&nbsp; '
                         f'<a href="{open_href}" style="color:#9ec5fe; text-decoration:none;">Open in Editor</a>'
                         f' &nbsp;·&nbsp; '
                         f'<a href="{copy_href}" style="color:#ffda6a; text-decoration:none;">Copy</a>'
-                        f'</span>'
                     )
                 else:
                     actions = ''
@@ -1800,7 +1782,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.chat_history.clear()
         self.chat_display.clear()
         self.last_response = None
-        self.execute_button.setEnabled(False)
+        # Standalone Run button removed; nothing to disable here
         # Disable Retry; no failed context anymore
         try:
             self.pending_failed_execution = None
@@ -1913,10 +1895,6 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         event.accept()
 
     # Removed: logs tab utilities (refresh, clear history, export, statistics)
-
-    def request_manual_improvement(self):
-        """Manually trigger a request for AI to improve the last failed code."""
-        self.request_ai_improvement()
 
     def on_retry_clicked(self):
         """Retry behavior: if a failed run exists, request improvement; otherwise resend last user query."""
@@ -2117,9 +2095,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             pass
 
-    def on_open_in_editor(self):
-        """Open the latest saved script in the Python Console editor without running it."""
-        self.on_dock_code_editor()
+    # Removed: on_open_in_editor — replaced by per-code-block Open in Editor actions
 
 
     def on_undock_copilot_panel(self):
@@ -2181,91 +2157,4 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             pass
     # Removed: Dock toggle checkbox handlers (auto-docking is enabled)
 
-    def on_dock_code_editor(self):
-        """Open the current script in the QGIS Python Console code editor."""
-        try:
-            # Ensure there is a saved script; save from last response if needed
-            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
-                if hasattr(self, 'last_response') and self.last_response:
-                    filename_hint = None
-                    for item in reversed(self.chat_history):
-                        if item.get('sender') == 'You':
-                            filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
-                            break
-                    try:
-                        self._last_saved_task_path = self.pyqgis_executor.save_response_to_task_file(
-                            self.last_response, filename_hint=filename_hint
-                        )
-                    except Exception:
-                        self._last_saved_task_path = None
-            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
-                QMessageBox.information(self, "Info", "No saved script available yet. Send a message to generate code first.")
-                return
-
-            # Show Python Console
-            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
-                try:
-                    self.iface.actionShowPythonDialog().trigger()
-                except Exception:
-                    pass
-
-            # Try to load the file into the Python Console editor
-            import qgis.utils as qutils
-            pc = None
-            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
-                pc = qutils.plugins.get('PythonConsole') or qutils.plugins.get('pythonconsole')
-                if not pc:
-                    for k, v in qutils.plugins.items():
-                        if 'python' in k.lower() and 'console' in k.lower():
-                            pc = v
-                            break
-            # Ensure editor is visible
-            for act_name in ('actionShowEditor', 'actionEditor', 'toggleEditor', 'showEditor'):
-                act = getattr(pc, act_name, None)
-                if act:
-                    try:
-                        if hasattr(act, 'setChecked'):
-                            act.setChecked(True)
-                        if hasattr(act, 'trigger'):
-                            act.trigger()
-                    except Exception:
-                        pass
-            # Try direct file open methods
-            loaded = False
-            for meth in ('openFileInEditor', 'openScriptFile', 'loadScript', 'addToEditor'):
-                fn = getattr(pc, meth, None)
-                if callable(fn):
-                    try:
-                        fn(self._last_saved_task_path)
-                        loaded = True
-                        break
-                    except Exception:
-                        pass
-            # Final fallback: run a snippet inside console context to open the file
-            if not loaded:
-                console = getattr(pc, 'console', None)
-                if console and hasattr(console, 'runCommand'):
-                    fp = self._last_saved_task_path.replace('\\', '/').replace("'", "\'")
-                    cmd = f"""# Copilot: open file in Python Console editor
-import qgis.utils as _qutils
-_pc = _qutils.plugins.get('PythonConsole') or _qutils.plugins.get('pythonconsole')
-for _a in ('actionShowEditor','actionEditor','toggleEditor','showEditor'):
-    _act = getattr(_pc, _a, None)
-    if _act:
-        getattr(_act, 'setChecked', lambda *_: None)(True)
-        getattr(_act, 'trigger', lambda *_: None)()
-for _m in ('openFileInEditor','openScriptFile','loadScript','addToEditor'):
-    _fn = getattr(_pc, _m, None)
-    if callable(_fn):
-        try:
-            _fn(r'{fp}')
-            break
-        except Exception:
-            pass
-"""
-                    try:
-                        console.runCommand(cmd)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    # Removed: on_dock_code_editor (unused)

@@ -1541,10 +1541,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     )
                     title = f'PyQGIS Code Block #{i+1}'
                     header = (
-                        '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
-                        'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
-                        'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
-                        f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
+                        '<div style="background:linear-gradient(135deg,#f5f5f5 0%,#e9ecef 100%); color:#000000; padding:6px 10px; '
+                        'border:1px solid #cccccc; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                        'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
+                        '<table style="width:100%; border-collapse:collapse;" cellspacing="0" cellpadding="0">'
+                        '<tr>'
+                        f'<td style="vertical-align:middle;">{title}</td>'
+                        f'<td style="vertical-align:middle; font-weight:normal;" align="right">{actions}</td>'
+                        '</tr>'
+                        '</table>'
                         '</div>'
                     )
                     pre = (
@@ -1862,10 +1867,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     actions = ''
                 title = f'PyQGIS Code Block #{idx+1}'
                 header = (
-                    '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
-                    'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
-                    'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
-                    f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
+                    '<div style="background:linear-gradient(135deg,#f5f5f5 0%,#e9ecef 100%); color:#000000; padding:6px 10px; '
+                    'border:1px solid #cccccc; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                    'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
+                    '<table style="width:100%; border-collapse:collapse;" cellspacing="0" cellpadding="0">'
+                    '<tr>'
+                    f'<td style="vertical-align:middle;">{title}</td>'
+                    f'<td style="vertical-align:middle; font-weight:normal;" align="right">{actions}</td>'
+                    '</tr>'
+                    '</table>'
                     '</div>'
                 )
                 return f'<div style="margin:12px 0; border-radius:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.08);">{header}{pre_html}</div>'
@@ -1901,10 +1911,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                             )
                             title = f'PyQGIS Code Block #{i+1}'
                             header = (
-                                '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
-                                'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
-                                'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
-                                f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
+                                '<div style="background:linear-gradient(135deg,#f5f5f5 0%,#e9ecef 100%); color:#000000; padding:6px 10px; '
+                                'border:1px solid #cccccc; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                                'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
+                                '<table style="width:100%; border-collapse:collapse;" cellspacing="0" cellpadding="0">'
+                                '<tr>'
+                                f'<td style="vertical-align:middle;">{title}</td>'
+                                f'<td style="vertical-align:middle; font-weight:normal;" align="right">{actions}</td>'
+                                '</tr>'
+                                '</table>'
                                 '</div>'
                             )
                             pre = (

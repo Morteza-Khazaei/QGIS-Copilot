@@ -10,7 +10,7 @@ from datetime import datetime
 from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QSettings
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QTextEdit, QLineEdit,
-    QPushButton, QToolButton, QMenu, QSplitter, QLabel, QCheckBox, QGroupBox,
+    QPushButton, QToolButton, QMenu, QSplitter, QLabel, QCheckBox, QGroupBox, QLayout,
     QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
     QToolTip, QDockWidget, QSizePolicy
 )
@@ -57,6 +57,9 @@ class CopilotChatDialog(QDialog):
             pass
 
         self.setup_ui()
+        # Set a reasonable default size and minimum size for responsiveness
+        self.resize(1000, 700)
+        self.setMinimumSize(600, 500)
 
         # Select saved provider or default to Ollama (Local)
         try:
@@ -107,8 +110,6 @@ class CopilotChatDialog(QDialog):
     def setup_ui(self):
         """Setup the user interface"""
         self.setWindowTitle("QGIS Copilot")
-        self.setMinimumSize(800, 600)
-        self.resize(1000, 700)
         
         # Main layout
         main_layout = QVBoxLayout()
@@ -146,6 +147,9 @@ class CopilotChatDialog(QDialog):
         
         main_layout.addWidget(self.tab_widget)
         self.setLayout(main_layout)
+
+        # Allow the dialog to be resizable by setting the layout's size constraint
+        self.layout().setSizeConstraint(QLayout.SetDefaultConstraint)
 
     def minimize_window(self):
         """Minimize the dialog window."""
@@ -281,11 +285,8 @@ class CopilotChatDialog(QDialog):
         # Set splitter behavior for proportional resizing
         try:
             splitter.setChildrenCollapsible(False)
-            splitter.setStretchFactor(0, 3)  # chat side
-            splitter.setStretchFactor(1, 2)  # logs side
         except Exception:
-            # Fallback to an initial ratio
-            splitter.setSizes([600, 400])
+            pass
         
         layout.addWidget(splitter)
         
@@ -374,7 +375,6 @@ class CopilotChatDialog(QDialog):
         prefs_group.setLayout(prefs_layout)
         layout.addWidget(prefs_group)
 
-        layout.addStretch()
         settings_widget.setLayout(layout)
         return settings_widget
 
@@ -499,14 +499,11 @@ class CopilotChatDialog(QDialog):
         # Prompt editor: single scrollbar inside the editor, buttons remain outside
         self.system_prompt_input = QTextEdit()
         self.system_prompt_input.setAcceptRichText(False)
-        # Fix visible height to roughly 10 lines; let editor scroll internally
-        # try:
-        #     line_height = self.system_prompt_input.fontMetrics().lineSpacing()
-        #     target_height = int(line_height * 10 + 12)
-        #     self.system_prompt_input.setFixedHeight(target_height)
-        # except Exception:
-        #     self.system_prompt_input.setFixedHeight(220)
-        self.system_prompt_input.setFixedHeight(100)
+        try:
+            self.system_prompt_input.setMinimumHeight(60)
+            self.system_prompt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
 
         self.system_prompt_input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.system_prompt_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -528,7 +525,6 @@ class CopilotChatDialog(QDialog):
         prompt_group.setLayout(prompt_layout)
         layout.addWidget(prompt_group)
 
-        layout.addStretch()
         ai_widget.setLayout(layout)
         return ai_widget
     
@@ -1558,7 +1554,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
                 # Avoid enforcing minimums; let the splitter control size freely
                 dock.setMinimumSize(0, 0)
-                dock.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                dock.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 # Ensure closing the dock does not delete it, so we can show it again
                 dock.setAttribute(Qt.WA_DeleteOnClose, False)
                 # No checkbox to sync; rely on plugin action to reopen hidden dock
@@ -1570,19 +1566,19 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 self.setWindowFlags(Qt.Widget)
                 # Remove dialog minimums so users can freely resize the bottom area
                 self.setMinimumSize(0, 0)
-                self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 # Loosen minimums on large inner widgets so the tab can shrink
                 try:
                     if hasattr(self, 'chat_display') and self.chat_display is not None:
                         self.chat_display.setMinimumHeight(0)
-                        self.chat_display.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                        self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
                 try:
                     if hasattr(self, 'execution_display') and self.execution_display is not None:
                         self.execution_display.setMinimumHeight(0)
                         self.execution_display.setMinimumWidth(0)
-                        self.execution_display.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                        self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
                 # Allow the System Prompt editor and tabs to expand with the dock height
@@ -1590,7 +1586,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
                         self.system_prompt_input.setMinimumHeight(0)
                         self.system_prompt_input.setMaximumHeight(16777215)
-                        self.system_prompt_input.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                        self.system_prompt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
                 try:
@@ -1725,23 +1721,27 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             try:
                 self.setParent(None)
                 self.setWindowFlags(Qt.Dialog | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
-                self.setMinimumSize(800, 600)
+                self.setMinimumSize(600, 500)
                 self.resize(1000, 700)
-                # Set inner widgets back to reasonable minimums
+                # Ensure inner widgets are responsive
                 try:
                     if hasattr(self, 'chat_display') and self.chat_display is not None:
-                        self.chat_display.setMinimumHeight(100)
+                        self.chat_display.setMinimumHeight(0)
+                        self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
                 try:
                     if hasattr(self, 'execution_display') and self.execution_display is not None:
                         self.execution_display.setMinimumHeight(0)
+                        self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
-                # Restore a compact prompt editor height for dialog mode
+                # Allow prompt editor to be fully resizable
                 try:
                     if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
-                        self.system_prompt_input.setMaximumHeight(100)
+                        self.system_prompt_input.setMinimumHeight(60)
+                        self.system_prompt_input.setMaximumHeight(16777215)
+                        self.system_prompt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 except Exception:
                     pass
                 self.show()
@@ -1758,3 +1758,92 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             pass
     # Removed: Dock toggle checkbox handlers (auto-docking is enabled)
+
+    def on_dock_code_editor(self):
+        """Open the current script in the QGIS Python Console code editor."""
+        try:
+            # Ensure there is a saved script; save from last response if needed
+            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
+                if hasattr(self, 'last_response') and self.last_response:
+                    filename_hint = None
+                    for item in reversed(self.chat_history):
+                        if item.get('sender') == 'You':
+                            filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                            break
+                    try:
+                        self._last_saved_task_path = self.pyqgis_executor.save_response_to_task_file(
+                            self.last_response, filename_hint=filename_hint
+                        )
+                    except Exception:
+                        self._last_saved_task_path = None
+            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
+                QMessageBox.information(self, "Info", "No saved script available yet. Send a message to generate code first.")
+                return
+
+            # Show Python Console
+            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                try:
+                    self.iface.actionShowPythonDialog().trigger()
+                except Exception:
+                    pass
+
+            # Try to load the file into the Python Console editor
+            import qgis.utils as qutils
+            pc = None
+            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                pc = qutils.plugins.get('PythonConsole') or qutils.plugins.get('pythonconsole')
+                if not pc:
+                    for k, v in qutils.plugins.items():
+                        if 'python' in k.lower() and 'console' in k.lower():
+                            pc = v
+                            break
+            # Ensure editor is visible
+            for act_name in ('actionShowEditor', 'actionEditor', 'toggleEditor', 'showEditor'):
+                act = getattr(pc, act_name, None)
+                if act:
+                    try:
+                        if hasattr(act, 'setChecked'):
+                            act.setChecked(True)
+                        if hasattr(act, 'trigger'):
+                            act.trigger()
+                    except Exception:
+                        pass
+            # Try direct file open methods
+            loaded = False
+            for meth in ('openFileInEditor', 'openScriptFile', 'loadScript', 'addToEditor'):
+                fn = getattr(pc, meth, None)
+                if callable(fn):
+                    try:
+                        fn(self._last_saved_task_path)
+                        loaded = True
+                        break
+                    except Exception:
+                        pass
+            # Final fallback: run a snippet inside console context to open the file
+            if not loaded:
+                console = getattr(pc, 'console', None)
+                if console and hasattr(console, 'runCommand'):
+                    fp = self._last_saved_task_path.replace('\\', '/').replace("'", "\'")
+                    cmd = f"""# Copilot: open file in Python Console editor
+import qgis.utils as _qutils
+_pc = _qutils.plugins.get('PythonConsole') or _qutils.plugins.get('pythonconsole')
+for _a in ('actionShowEditor','actionEditor','toggleEditor','showEditor'):
+    _act = getattr(_pc, _a, None)
+    if _act:
+        getattr(_act, 'setChecked', lambda *_: None)(True)
+        getattr(_act, 'trigger', lambda *_: None)()
+for _m in ('openFileInEditor','openScriptFile','loadScript','addToEditor'):
+    _fn = getattr(_pc, _m, None)
+    if callable(_fn):
+        try:
+            _fn(r'{fp}')
+            break
+        except Exception:
+            pass
+"""
+                    try:
+                        console.runCommand(cmd)
+                    except Exception:
+                        pass
+        except Exception:
+            pass

@@ -180,7 +180,7 @@ class CopilotChatDialog(QDialog):
         chat_widget = QWidget()
         layout = QVBoxLayout()
         
-        # Create splitter for chat and execution results
+        # Create splitter (single pane now; logs go to QGIS Log Messages)
         splitter = QSplitter(Qt.Horizontal)
         
         # Left side - Chat interface
@@ -245,44 +245,9 @@ class CopilotChatDialog(QDialog):
         chat_container.setLayout(chat_layout)
         splitter.addWidget(chat_container)
         
-        # Right side - Execution results with enhanced display
-        execution_container = QWidget()
-        execution_layout = QVBoxLayout()
+        # Right-side live log panel removed — logs now go to QGIS Log Messages
         
-        # Execution results header with buttons
-        exec_header_layout = QHBoxLayout()
-        exec_header_layout.addWidget(QLabel("Live Logs:"))
-
-        # Create the display widget before connecting signals to it
-        self.execution_display = QTextEdit()
-        try:
-            self.execution_display.setMinimumWidth(0)
-            self.execution_display.setMinimumHeight(0)
-            self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        except Exception:
-            pass
-        self.execution_display.setReadOnly(True)
-        self.execution_display.setFont(QFont("Consolas", 10))
-        # Terminal-like black panel for live logs
-        self.execution_display.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e; /* terminal black */
-                color: #d4d4d4;            /* terminal light text */
-                border: 1px solid #333333;
-                padding: 6px;
-            }
-        """)
-
-        # Removed separate clear button here; use unified 'Clear All' above
-        exec_header_layout.addStretch()
-        
-        execution_layout.addLayout(exec_header_layout)
-        execution_layout.addWidget(self.execution_display)
-        
-        execution_container.setLayout(execution_layout)
-        splitter.addWidget(execution_container)
-        
-        # Set splitter behavior for proportional resizing
+        # Set splitter behavior
         try:
             splitter.setChildrenCollapsible(False)
         except Exception:
@@ -304,13 +269,29 @@ class CopilotChatDialog(QDialog):
         """Create the non-AI settings tab (workspace, execution prefs)"""
         settings_widget = QWidget()
         layout = QVBoxLayout()
+        # Tighten overall vertical rhythm on Settings tab
+        try:
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+        except Exception:
+            pass
 
         # Workspace settings
         workspace_group = QGroupBox("Workspace (Script Save Location)")
         ws_layout = QVBoxLayout()
+        try:
+            ws_layout.setContentsMargins(8, 8, 8, 8)
+            ws_layout.setSpacing(6)
+        except Exception:
+            pass
         ws_layout.addWidget(QLabel("Choose where QGIS Copilot saves and runs generated Python scripts:"))
         
         ws_row = QHBoxLayout()
+        try:
+            ws_row.setContentsMargins(0, 0, 0, 0)
+            ws_row.setSpacing(6)
+        except Exception:
+            pass
         self.workspace_dir_input = QLineEdit()
         self.workspace_dir_input.setPlaceholderText("Select a folder to store generated scripts...")
         ws_browse_btn = QPushButton("Browse…")
@@ -324,7 +305,7 @@ class CopilotChatDialog(QDialog):
         ws_row.addWidget(ws_open_btn)
         ws_row.addWidget(ws_save_btn)
         ws_layout.addLayout(ws_row)
-        
+
         ws_hint = QLabel("If unset, Copilot defaults to a 'workspace' folder inside the plugin directory.")
         ws_hint.setWordWrap(True)
         ws_layout.addWidget(ws_hint)
@@ -335,11 +316,20 @@ class CopilotChatDialog(QDialog):
         # Chat and Execution Preferences
         prefs_group = QGroupBox("Chat and Execution Preferences")
         prefs_layout = QVBoxLayout()
+        try:
+            prefs_layout.setContentsMargins(8, 8, 8, 8)
+            prefs_layout.setSpacing(6)
+        except Exception:
+            pass
 
         # Organized grid for checkboxes (2 columns)
         grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
+        try:
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(4)
+        except Exception:
+            pass
 
         # Chat context options (left column)
         self.include_context_cb = QCheckBox("Include QGIS Context")
@@ -1284,7 +1274,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         status_text = "succeeded" if success else "failed"
         self.add_to_chat(
             "System",
-            f"Code execution {status_text}. See the Live Logs panel for details.",
+            f"Code execution {status_text}. See Log Messages panel for details.",
             summary_color,
         )
 
@@ -1491,16 +1481,17 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         return content
     
     def add_to_execution_results(self, message):
-        """Add message to execution results"""
-        cursor = self.execution_display.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        # Ensure each message ends with a newline for readability
-        if message and not message.endswith("\n"):
-            message = message + "\n"
-        cursor.insertText(message)
-        
-        self.execution_display.setTextCursor(cursor)
-        self.execution_display.ensureCursorVisible()
+        """Send live log messages to QGIS Log Messages panel (no in-dialog panel)."""
+        try:
+            if message is None:
+                return
+            # Normalize to string and avoid trailing newlines duplication
+            text = str(message).rstrip("\n")
+            if not text:
+                return
+            QgsMessageLog.logMessage(text, "QGIS Copilot", level=Qgis.Info)
+        except Exception:
+            pass
     
     def show_progress(self, message="Processing..."):
         """Show progress bar with message"""

@@ -233,12 +233,17 @@ class CopilotChatDialog(QDialog):
         clear_all_button.setToolTip("Clear chat history and live logs")
         clear_all_button.clicked.connect(self.clear_all)
         
-        improve_last_button = QPushButton("Request Improvement")
-        improve_last_button.clicked.connect(self.request_manual_improvement)
-        improve_last_button.setToolTip("Ask AI to improve the last failed code execution")
+        # Retry button: disabled until a failure happens
+        self.retry_button = QPushButton("Retry")
+        self.retry_button.clicked.connect(self.on_retry_clicked)
+        self.retry_button.setToolTip("Ask AI to fix the last failed run and retry")
+        try:
+            self.retry_button.setEnabled(False)
+        except Exception:
+            pass
 
         chat_management_layout.addWidget(clear_all_button)
-        chat_management_layout.addWidget(improve_last_button)
+        chat_management_layout.addWidget(self.retry_button)
         chat_management_layout.addStretch()
         chat_layout.addLayout(chat_management_layout)
         
@@ -814,6 +819,12 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
 
             # Clear input
             self.message_input.clear()
+            # Enable Retry so user can resend the last prompt if desired
+            try:
+                if hasattr(self, 'retry_button') and self.retry_button:
+                    self.retry_button.setEnabled(True)
+            except Exception:
+                pass
 
         # Get QGIS context if requested
         context = None
@@ -1292,7 +1303,14 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             if self.auto_feedback_enabled:
                 # Delay to allow user to see the error before AI responds
                 self.feedback_timer.start(1500)
+            try:
+                if hasattr(self, 'retry_button') and self.retry_button:
+                    self.retry_button.setEnabled(True)
+            except Exception:
+                pass
         else:
+            # On success, clear any previous failure; keep Retry enabled so user can retry query
+            self.pending_failed_execution = None
             # On success, offer to save the script under a task-based name once per task
             try:
                 current_file = self.pyqgis_executor.get_current_task_file()
@@ -1389,8 +1407,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         formatted_content = None
         if is_md:
             try:
+                # Auto-fence obvious code blocks so they render as code
+                message_md = self.auto_fence_code_blocks(message)
                 temp_doc = QTextDocument()
-                temp_doc.setMarkdown(message)
+                temp_doc.setMarkdown(message_md)
                 html_content = temp_doc.toHtml()
                 html_content = self.extract_body_content(html_content)
                 formatted_content = self.style_markdown_html(html_content)
@@ -1468,6 +1488,100 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             return html_text
 
+    def auto_fence_code_blocks(self, text: str) -> str:
+        """Wrap obvious code sections in fenced Markdown blocks.
+
+        This helps when AI outputs plain code without ``` fences or 4-space indentation.
+        Heuristics: detect runs of >= 3 lines where most lines look like Python code
+        (imports, defs, control flow, assignments, from qgis, etc.).
+        """
+        try:
+            if not isinstance(text, str) or not text:
+                return text
+            # If already contains any fenced blocks, leave as-is
+            if '```' in text or '~~~' in text:
+                return text
+
+            import re
+            lines = text.splitlines()
+            n = len(lines)
+            i = 0
+            out = []
+            code_mode = False
+            code_buf = []
+
+            def looks_code(line: str) -> bool:
+                s = line.rstrip()
+                if not s:
+                    return False
+                if s.startswith(('from ', 'import ', 'def ', 'class ', 'try:', 'except', 'with ', 'for ', 'while ', 'if ', 'elif ', 'else:', '#')):
+                    return True
+                if re.search(r"\bQgs[A-Za-z_]+\b", s):
+                    return True
+                if re.search(r"\biface\b|\bproject\b|\bprocessing\b", s):
+                    return True
+                if re.search(r"[^\s] = [^=]", s):
+                    return True
+                if s.endswith((':', ')')) or '(' in s or ')' in s:
+                    return True
+                return False
+
+            while i < n:
+                line = lines[i]
+                is_code = looks_code(line)
+                if not code_mode:
+                    # Start a potential code block when we see a run of code-like lines
+                    if is_code:
+                        # Look ahead to ensure a run
+                        run_len = 0
+                        j = i
+                        while j < n and (looks_code(lines[j]) or not lines[j].strip()):
+                            if lines[j].strip():
+                                run_len += 1
+                            j += 1
+                        if run_len >= 3:
+                            # Start code mode
+                            code_mode = True
+                            code_buf = []
+                            out.append("```python")
+                            # do not increment i here; fall through and collect line
+                        else:
+                            out.append(line)
+                            i += 1
+                            continue
+                    else:
+                        out.append(line)
+                        i += 1
+                        continue
+
+                if code_mode:
+                    # Accumulate until the run ends (allow blank lines inside)
+                    if is_code or not line.strip():
+                        code_buf.append(line)
+                        i += 1
+                        # If next line breaks the run, close
+                        if i >= n or (lines[i].strip() and not looks_code(lines[i])):
+                            out.extend(code_buf)
+                            out.append("```")
+                            code_mode = False
+                            code_buf = []
+                    else:
+                        # Close and reprocess this non-code line in outer loop
+                        out.extend(code_buf)
+                        out.append("```")
+                        code_mode = False
+                        code_buf = []
+                        # do not increment i to re-evaluate this line as non-code
+                
+            # If ended while still in code mode, close it
+            if code_mode and code_buf:
+                out.extend(code_buf)
+                out.append("```")
+
+            return "\n".join(out) if out else text
+        except Exception:
+            return text
+
     def style_markdown_html(self, html_text: str) -> str:
         """Lightweight inline styling for Qt Markdown HTML to improve readability.
 
@@ -1522,9 +1636,9 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             styled = ensure_style('td', 'border:1px solid #ddd; padding:4px 8px;', styled)
 
             # Code blocks and inline code
-            pre_style = 'background:#000000; color:#EEEEEE; border:1px solid #000; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Menlo,monospace; font-size:9pt;'
+            pre_style = 'background-color:#000000; color:#EEEEEE; border:1px solid #000; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Menlo,monospace; font-size:9pt;'
             code_style = 'background:#f0f2f5; color:#c7254e; padding:2px 4px; border-radius:3px; font-family:Consolas,Menlo,monospace; font-size:9pt;'
-
+            
             # Protect <pre> blocks while styling inline <code>
             pre_blocks = []
             def _stash_pre(m):
@@ -1541,6 +1655,43 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 return pre_blocks[idx]
             restored = re.sub(r'__PRE_BLOCK_(\d+)__', _restore_pre, protected)
             styled = ensure_style('pre', pre_style, restored)
+
+            # Ensure nested <code> inside <pre> inherits light text and mono font
+            # Merge when style exists
+            styled = re.sub(
+                r'(<pre[^>]*>\s*<code[^>]*?)style="([^"]*)"([^>]*>)',
+                lambda m: f"{m.group(1)}style=\"{m.group(2)}; color:#EEEEEE; font-family:Consolas,Menlo,monospace; font-size:9pt;\"{m.group(3)}",
+                styled,
+                flags=re.IGNORECASE,
+            )
+            # Add when style missing on <code> inside <pre>
+            styled = re.sub(
+                r'(<pre[^>]*>\s*<code)(?![^>]*style=)([^>]*>)',
+                r'\1 style="color:#EEEEEE; font-family:Consolas,Menlo,monospace; font-size:9pt;"\2',
+                styled,
+                flags=re.IGNORECASE,
+            )
+
+            # Wrap each <pre> with a simple header bar to differentiate code visually
+            def _wrap_pre(m):
+                pre_html = m.group(0)
+                # Ensure top corners are square so the header sits flush and remove outer margins
+                pre_html = re.sub(
+                    r'<pre([^>]*)style="([^"]*)"',
+                    lambda mm: f'<pre{mm.group(1)}style="{mm.group(2)}; margin:0; border-top-left-radius:0; border-top-right-radius:0;"',
+                    pre_html,
+                    flags=re.IGNORECASE,
+                )
+                header = (
+                    '<div style="background-color:#000000; color:#FFFFFF; padding:6px 10px; '
+                    'border:1px solid #000; border-bottom:none; border-top-left-radius:6px; '
+                    'border-top-right-radius:6px; font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
+                    'PyQGIS Code'
+                    '</div>'
+                )
+                return f'<div style="margin:10px 0;">{header}{pre_html}</div>'
+
+            styled = re.sub(r'<pre[\s\S]*?</pre>', _wrap_pre, styled, flags=re.IGNORECASE)
 
             return styled
         except Exception:
@@ -1561,6 +1712,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.chat_display.clear()
         self.last_response = None
         self.execute_button.setEnabled(False)
+        # Disable Retry; no failed context anymore
+        try:
+            self.pending_failed_execution = None
+            if hasattr(self, 'retry_button') and self.retry_button:
+                self.retry_button.setEnabled(False)
+        except Exception:
+            pass
 
     def clear_all(self):
         """Clear both chat history and live logs in one action."""
@@ -1589,6 +1747,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         # Reset sticky task file so next task uses a new filename
         try:
             self.pyqgis_executor.reset_task_file()
+        except Exception:
+            pass
+        # Ensure Retry disabled
+        try:
+            self.pending_failed_execution = None
+            if hasattr(self, 'retry_button') and self.retry_button:
+                self.retry_button.setEnabled(False)
         except Exception:
             pass
 
@@ -1663,6 +1828,32 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
     def request_manual_improvement(self):
         """Manually trigger a request for AI to improve the last failed code."""
         self.request_ai_improvement()
+
+    def on_retry_clicked(self):
+        """Retry behavior: if a failed run exists, request improvement; otherwise resend last user query."""
+        try:
+            # If there's a failed execution context, prioritize improvement flow
+            if self.pending_failed_execution:
+                self.request_ai_improvement()
+                return
+            # Otherwise, find the last user message and resend it
+            last_user_msg = None
+            for item in reversed(self.chat_history):
+                if item.get('sender') == 'You':
+                    last_user_msg = (item.get('message') or '').strip()
+                    if last_user_msg:
+                        break
+            if not last_user_msg:
+                QMessageBox.information(self, "Retry", "No previous user query found to retry.")
+                return
+            # Reuse the normal send flow so all preferences/context apply
+            try:
+                self.message_input.setText(last_user_msg)
+            except Exception:
+                pass
+            self.send_message()
+        except Exception:
+            pass
 
     def request_ai_improvement(self):
         """Ask the AI to improve the last failed code execution."""

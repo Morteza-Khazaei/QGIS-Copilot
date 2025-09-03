@@ -340,8 +340,27 @@ class EnhancedPyQGISExecutor(QObject):
         if len(self.execution_history) > self.max_history:
             self.execution_history = self.execution_history[-self.max_history:]
         
-        # Emit log update
-        self.logs_updated.emit(execution_log.get_formatted_log())
+        # Emit log update (redacted: do not include the full code in UI logs)
+        try:
+            self.logs_updated.emit(self.format_log_for_ui(execution_log))
+        except Exception:
+            # Fallback to minimal status line
+            ts = execution_log.timestamp.strftime("%H:%M:%S")
+            status = "✅ SUCCESS" if execution_log.success else "❌ ERROR"
+            self.logs_updated.emit(f"[{ts}] {status} (execution time: {execution_log.execution_time:.3f}s)\n" + "-" * 50 + "\n")
+
+    def format_log_for_ui(self, log: ExecutionLog) -> str:
+        """Format a log entry for the UI/Log Messages without including the Python code body."""
+        parts = []
+        ts = log.timestamp.strftime("%H:%M:%S")
+        status = "✅ SUCCESS" if log.success else "❌ ERROR"
+        parts.append(f"[{ts}] {status} (execution time: {log.execution_time:.3f}s)")
+        if log.output:
+            parts.append(f"OUTPUT:\n{log.output}")
+        if not log.success and log.error_msg:
+            parts.append(f"ERROR:\n{log.error_msg}")
+        parts.append("-" * 50)
+        return "\n".join(parts) + "\n"
     
     def get_execution_context_for_ai(self, last_n_executions=3):
         """Get execution context to send back to AI for improvements"""

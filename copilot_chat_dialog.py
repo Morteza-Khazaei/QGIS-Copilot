@@ -613,6 +613,15 @@ class CopilotChatDialog(QDialog):
                         self.add_to_execution_results('=' * 50)
                         self.pyqgis_executor.execute_code(code)
                     elif action == 'open':
+                        # Prefer opening the saved script produced when the AI replied
+                        try:
+                            path = getattr(self, '_last_saved_task_path', None)
+                            if path and os.path.exists(path):
+                                self._open_file_in_python_console_editor(path)
+                                return
+                        except Exception:
+                            pass
+                        # Fallback: open the block content in the Copilot dock editor
                         self.ensure_code_editor_dock(code)
                     elif action == 'copy':
                         try:
@@ -625,6 +634,64 @@ class CopilotChatDialog(QDialog):
             pass
         # Fallback: open external links
         QDesktopServices.openUrl(url)
+
+    def _open_file_in_python_console_editor(self, file_path: str):
+        """Open a .py file in the QGIS Python Console's code editor (best-effort)."""
+        try:
+            # Ensure Python Console is visible
+            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                try:
+                    self.iface.actionShowPythonDialog().trigger()
+                except Exception:
+                    pass
+            import qgis.utils as qutils
+            pc = None
+            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                pc = qutils.plugins.get('PythonConsole') or qutils.plugins.get('pythonconsole')
+                if not pc:
+                    for k, v in qutils.plugins.items():
+                        if 'python' in k.lower() and 'console' in k.lower():
+                            pc = v
+                            break
+            # Try to show the editor pane
+            for act_name in ('actionShowEditor', 'actionEditor', 'toggleEditor', 'showEditor'):
+                act = getattr(pc, act_name, None)
+                if act:
+                    try:
+                        if hasattr(act, 'setChecked'):
+                            act.setChecked(True)
+                        if hasattr(act, 'trigger'):
+                            act.trigger()
+                    except Exception:
+                        pass
+            # Try the common open methods
+            for meth in ('openFileInEditor', 'openScriptFile', 'loadScript', 'addToEditor'):
+                fn = getattr(pc, meth, None)
+                if callable(fn):
+                    try:
+                        fn(file_path)
+                        return
+                    except Exception:
+                        pass
+            # Final fallback: run a command in the console to open it
+            console = getattr(pc, 'console', None)
+            if console and hasattr(console, 'runCommand'):
+                fp = str(file_path).replace('\\', '/').replace("'", "\'")
+                cmd = (
+                    "import qgis.utils as _qutils\n"
+                    "_pc = _qutils.plugins.get('PythonConsole') or _qutils.plugins.get('pythonconsole')\n"
+                    "for _m in ('openFileInEditor','openScriptFile','loadScript','addToEditor'):\n"
+                    "    _fn = getattr(_pc, _m, None)\n"
+                    "    if callable(_fn):\n"
+                    f"        _fn(r'{fp}')\n"
+                    "        break\n"
+                )
+                try:
+                    console.runCommand(cmd)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def update_api_settings_ui(self):
         """Update settings UI based on selected provider"""
@@ -1333,42 +1400,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         else:
             # On success, clear any previous failure; keep Retry enabled so user can retry query
             self.pending_failed_execution = None
-            # On success, offer to save the script under a task-based name once per task
-            try:
-                current_file = self.pyqgis_executor.get_current_task_file()
-            except Exception:
-                current_file = None
-            if current_file and current_file != self._last_prompted_task_file:
-                # Derive a suggested name from the last user message
-                suggested = "qgis_task"
-                try:
-                    for item in reversed(self.chat_history):
-                        if item.get('sender') == 'You':
-                            suggested = (item.get('message') or '').strip().splitlines()[0][:80]
-                            break
-                except Exception:
-                    pass
-                # Slugify preview (UI only)
-                try:
-                    import re as _re
-                    preview = _re.sub(r"[^A-Za-z0-9]+", "_", suggested).strip('_') or 'qgis_task'
-                except Exception:
-                    preview = 'qgis_task'
-                reply = QMessageBox.question(
-                    self,
-                    'Save Task Script',
-                    f"Do you want to save the script under this name in the workspace?\n\n{preview}.py",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
-                if reply == QMessageBox.Yes:
-                    try:
-                        dest = self.pyqgis_executor.finalize_task_as(suggested)
-                        QMessageBox.information(self, "Saved", f"Script saved as:\n{dest}")
-                    except Exception as e:
-                        QMessageBox.warning(self, "Save Failed", f"Could not save script: {e}")
-                # Mark that we prompted for this task file
-                self._last_prompted_task_file = current_file
+            # Removed redundant post-success save prompt; script is already saved once per response
 
     def handle_logs_updated(self, formatted_log_entry):
         """Append new log entry to the live display."""
@@ -1408,8 +1440,16 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             pass
         
-        # Add to display
+        # Add to display with the current message id available for header actions
+        try:
+            self._current_render_msg_id = msg_id
+        except Exception:
+            pass
         self.render_message(sender, message, color, timestamp)
+        try:
+            del self._current_render_msg_id
+        except Exception:
+            pass
 
     def render_message(self, sender, message, color, timestamp):
         """Render a single chat message using Qt's native Markdown support when appropriate."""
@@ -1426,16 +1466,19 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         is_system = (sender == "System")
         align = "right" if is_user else "left"
 
-        # Bubble palettes
+        # Bubble palettes (enhanced)
         if is_user:
-            bubble_bg_color = "#e6f7ff"
-            bubble_border_color = "#b3e0ff"
+            bubble_bg_color = "#e3f2fd"
+            bubble_border_color = "#90caf9"
+            bubble_shadow = "0 2px 4px rgba(25, 118, 210, 0.1)"
         elif is_system:
             bubble_bg_color = "#f5f5f5"
-            bubble_border_color = "#d9d9d9"
+            bubble_border_color = "#e0e0e0"
+            bubble_shadow = "0 1px 3px rgba(0, 0, 0, 0.1)"
         else:
-            bubble_bg_color = "#f6ffed"
-            bubble_border_color = "#b7eb8f"
+            bubble_bg_color = "#f1f8e9"
+            bubble_border_color = "#aed581"
+            bubble_shadow = "0 2px 4px rgba(76, 175, 80, 0.1)"
 
         # Build content using Markdown for AI messages by default; fallback heuristic otherwise
         ai_message = (not is_user and not is_system)
@@ -1448,20 +1491,81 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         if is_md:
             try:
                 # Auto-fence obvious code blocks so they render as code
-                message_md = self.auto_fence_code_blocks(message)
+                fenced_md = self.auto_fence_code_blocks(message)
+
+                # Replace fenced blocks with stable placeholders so we can inject styled HTML later
+                code_blocks = []
+                def _sub_fence(m):
+                    code = m.group(1)
+                    code_blocks.append(code)
+                    idx = len(code_blocks) - 1
+                    return f"\nCOPILOT_CODE_BLOCK_{idx}__TOKEN__\n"
+
+                import re as _re
+                fenced_with_tokens = _re.sub(r"```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```", _sub_fence, fenced_md)
+
+                # Render Markdown normally
                 temp_doc = QTextDocument()
-                temp_doc.setMarkdown(message_md)
+                temp_doc.setMarkdown(fenced_with_tokens)
                 html_content = temp_doc.toHtml()
                 html_content = self.extract_body_content(html_content)
-                # If this is an AI message, attach per-code-block actions
-                mid = None
-                try:
-                    # Lookup last inserted history id
-                    if len(self.chat_history) > 0:
+
+                # Apply general styling but disable its fallback appender (we will inject inline via tokens)
+                mid = getattr(self, '_current_render_msg_id', None)
+                if mid is None and self.chat_history:
+                    try:
                         mid = self.chat_history[-1].get('id')
-                except Exception:
-                    mid = None
-                formatted_content = self.style_markdown_html(html_content, mid=mid)
+                    except Exception:
+                        mid = None
+                styled_html = self.style_markdown_html(html_content, mid=mid, use_fallback=False)
+
+                # Build styled sections for each token and replace in place
+                for i, cb in enumerate(code_blocks):
+                    # Create the styled block (same visuals as primary path)
+                    import html as _html
+                    esc = _html.escape(cb)
+                    run_href = f"copilot://run?mid={mid}&i={i}" if mid is not None else None
+                    open_href = f"copilot://open?mid={mid}&i={i}" if mid is not None else None
+                    copy_href = f"copilot://copy?mid={mid}&i={i}" if mid is not None else None
+                    def _btn(href, bg, brd, label):
+                        if not href:
+                            return ''
+                        return (
+                            f'<a href="{href}" style="background:{bg}; color:#ffffff; padding:3px 6px; '
+                            f'border-radius:4px; text-decoration:none; font-size:8pt; font-weight:500; border:1px solid {brd};">{label}</a>'
+                        )
+                    actions = (
+                        _btn(run_href, '#28a745', '#1e7e34', '▶ Run') + '&nbsp;'
+                        + _btn(copy_href, '#6c757d', '#545b62', '📋 Copy') + '&nbsp;'
+                        + _btn(open_href, '#007bff', '#0056b3', '📝 Editor')
+                    )
+                    title = f'PyQGIS Code Block #{i+1}'
+                    header = (
+                        '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
+                        'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                        'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
+                        f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
+                        '</div>'
+                    )
+                    pre = (
+                        '<pre style="background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; '
+                        'border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; margin:0; '
+                        'white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; overflow-x:auto;">'
+                        f'<code style="color:#f0f0f0; background:transparent; border:none; padding:0;">{esc}</code>'
+                        '</pre>'
+                    )
+                    styled_section = (
+                        f'<div style="margin:12px 0; border-radius:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.08);">{header}{pre}</div>'
+                    )
+
+                    token = f'COPILOT_CODE_BLOCK_{i}__TOKEN__'
+                    # Prefer replacing a whole paragraph containing the token
+                    styled_html, _n = _re.subn(rf'<p[^>]*>\s*{_re.escape(token)}\s*</p>', styled_section, styled_html, flags=_re.IGNORECASE)
+                    if _n == 0:
+                        # Fall back to a plain string replace
+                        styled_html = styled_html.replace(token, styled_section)
+
+                formatted_content = styled_html
             except Exception:
                 formatted_content = None
         if not formatted_content:
@@ -1471,27 +1575,20 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             except Exception:
                 formatted_content = str(message)
 
-        # Main div for alignment and bubble markup
-        html = f'<div style="margin: 0 5px; text-align: {align};">'
-        html += f"""
-        <div style="
-            display: inline-block;
-            text-align: left;
-            max-width: 92%;
-            padding: 8px 12px;
-            border-radius: 12px;
-            background-color: {bubble_bg_color};
-            border: 1px solid {bubble_border_color};
-            margin-top: 5px;
-            margin-bottom: 5px;
-        ">
-            <div>
-                <strong style=\"color: {color};\">{sender}</strong>
-                <span style=\"color: #6c757d; font-size: 8pt;\">({timestamp})</span>
+        # Enhanced message bubble with header separator and shadow
+        html = f"""
+        <div style="margin: 8px 5px; text-align: {align};">
+          <div style="display: inline-block; text-align: left; max-width: 90%; padding: 12px 16px; border-radius: 16px; background-color: {bubble_bg_color}; border: 1px solid {bubble_border_color}; box-shadow: {bubble_shadow}; margin: 8px 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;">
+            <div style="margin-bottom: 8px; border-bottom: 1px solid {bubble_border_color}; padding-bottom: 6px;">
+              <strong style="color: {color}; font-size: 11pt;">{sender}</strong>
+              <span style="color: #6c757d; font-size: 9pt; margin-left: 8px;">({timestamp})</span>
             </div>
-            <div style=\"margin-top: 5px;\">{formatted_content}</div>
+            <div style="line-height: 1.5; color: #2c3e50;">
+              {formatted_content}
+            </div>
+          </div>
         </div>
-        </div>"""
+        """
 
         cursor.insertHtml(html)
         self.chat_display.setTextCursor(cursor)
@@ -1587,10 +1684,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                             if lines[j].strip():
                                 run_len += 1
                             j += 1
-                        if run_len >= 3:
+                        if run_len >= 2:
                             # Start code mode
                             code_mode = True
                             code_buf = []
+                            # ensure a blank line before fenced block
+                            if out and out[-1].strip():
+                                out.append("")
                             out.append("```python")
                             # do not increment i here; fall through and collect line
                         else:
@@ -1611,12 +1711,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                         if i >= n or (lines[i].strip() and not looks_code(lines[i])):
                             out.extend(code_buf)
                             out.append("```")
+                            # ensure a blank line after fenced block
+                            out.append("")
                             code_mode = False
                             code_buf = []
                     else:
                         # Close and reprocess this non-code line in outer loop
                         out.extend(code_buf)
                         out.append("```")
+                        out.append("")
                         code_mode = False
                         code_buf = []
                         # do not increment i to re-evaluate this line as non-code
@@ -1625,12 +1728,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             if code_mode and code_buf:
                 out.extend(code_buf)
                 out.append("```")
+                out.append("")
 
             return "\n".join(out) if out else text
         except Exception:
             return text
 
-    def style_markdown_html(self, html_text: str, mid: int = None) -> str:
+    def style_markdown_html(self, html_text: str, mid: int = None, use_fallback: bool = True) -> str:
         """Lightweight inline styling for Qt Markdown HTML to improve readability.
 
         Ensures fenced code blocks render as black code boxes and improves spacing and
@@ -1683,9 +1787,9 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             styled = ensure_style('th', 'border:1px solid #ddd; padding:4px 8px; background:#f1f3f5; text-align:left;', styled)
             styled = ensure_style('td', 'border:1px solid #ddd; padding:4px 8px;', styled)
 
-            # Code blocks and inline code
-            pre_style = 'background-color:#000000; color:#EEEEEE; border:1px solid #000; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Menlo,monospace; font-size:9pt;'
-            code_style = 'background:#f0f2f5; color:#c7254e; padding:2px 4px; border-radius:3px; font-family:Consolas,Menlo,monospace; font-size:9pt;'
+            # Code blocks and inline code (enhanced styling)
+            pre_style = 'background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; margin:0; overflow-x:auto;'
+            code_style = 'background:#f0f2f5; color:#c7254e; padding:2px 5px; border-radius:3px; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:1px solid #e1e5e9;'
             
             # Protect <pre> blocks while styling inline <code>
             pre_blocks = []
@@ -1708,14 +1812,14 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             # Merge when style exists
             styled = re.sub(
                 r'(<pre[^>]*>\s*<code[^>]*?)style="([^"]*)"([^>]*>)',
-                lambda m: f"{m.group(1)}style=\"{m.group(2)}; color:#EEEEEE; font-family:Consolas,Menlo,monospace; font-size:9pt;\"{m.group(3)}",
+                lambda m: f"{m.group(1)}style=\"{m.group(2)}; color:#f0f0f0; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;\"{m.group(3)}",
                 styled,
                 flags=re.IGNORECASE,
             )
             # Add when style missing on <code> inside <pre>
             styled = re.sub(
                 r'(<pre[^>]*>\s*<code)(?![^>]*style=)([^>]*>)',
-                r'\1 style="color:#EEEEEE; font-family:Consolas,Menlo,monospace; font-size:9pt;"\2',
+                r'\1 style="color:#f0f0f0; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;"\2',
                 styled,
                 flags=re.IGNORECASE,
             )
@@ -1740,27 +1844,115 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     run_href = f"copilot://run?mid={mid}&i={idx}"
                     open_href = f"copilot://open?mid={mid}&i={idx}"
                     copy_href = f"copilot://copy?mid={mid}&i={idx}"
+                    def btn(href, bg, brd, label):
+                        return (
+                            f'<a href="{href}" '
+                            f'style="background:{bg}; color:#ffffff; padding:3px 6px; '
+                            f'border-radius:4px; text-decoration:none; font-size:8pt; '
+                            f'font-weight:500; border:1px solid {brd};">{label}</a>'
+                        )
                     actions = (
-                        f' &nbsp;·&nbsp; '
-                        f'<a href="{run_href}" style="color:#8fd19e; text-decoration:none;">Run</a>'
-                        f' &nbsp;·&nbsp; '
-                        f'<a href="{open_href}" style="color:#9ec5fe; text-decoration:none;">Open in Editor</a>'
-                        f' &nbsp;·&nbsp; '
-                        f'<a href="{copy_href}" style="color:#ffda6a; text-decoration:none;">Copy</a>'
+                        btn(run_href, '#28a745', '#1e7e34', '▶ Run')
+                        + '&nbsp;'
+                        + btn(copy_href, '#6c757d', '#545b62', '📋 Copy')
+                        + '&nbsp;'
+                        + btn(open_href, '#007bff', '#0056b3', '📝 Editor')
                     )
                 else:
                     actions = ''
+                title = f'PyQGIS Code Block #{idx+1}'
                 header = (
-                    '<div style="background-color:#000000; color:#FFFFFF; padding:6px 10px; '
-                    'border:1px solid #000; border-bottom:none; border-top-left-radius:6px; '
-                    'border-top-right-radius:6px; font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
-                    'PyQGIS Code'
-                    f'{actions}'
+                    '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
+                    'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                    'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
+                    f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
                     '</div>'
                 )
-                return f'<div style="margin:10px 0;">{header}{pre_html}</div>'
+                return f'<div style="margin:12px 0; border-radius:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.08);">{header}{pre_html}</div>'
 
             styled = re.sub(r'<pre[\s\S]*?</pre>', _wrap_pre, styled, flags=re.IGNORECASE)
+
+            # Fallback: if Qt did not emit any <pre> blocks but we have detected code blocks,
+            # replace the original unstyled code in-place with styled sections. If no in-place
+            # match can be found, append styled sections at the end without removing prose.
+            try:
+                if use_fallback and ('<pre' not in styled.lower()) and mid is not None and hasattr(self, '_code_blocks_by_msg'):
+                    blocks = self._code_blocks_by_msg.get(mid) or []
+                    if blocks:
+                        import html as _html, re as _re
+                        remaining_to_append = []
+                        for i, cb in enumerate(blocks):
+                            # Build styled section for this block
+                            esc = _html.escape(cb)
+                            run_href = f"copilot://run?mid={mid}&i={i}"
+                            open_href = f"copilot://open?mid={mid}&i={i}"
+                            copy_href = f"copilot://copy?mid={mid}&i={i}"
+                            def btn(href, bg, brd, label):
+                                return (
+                                    f'<a href="{href}" '
+                                    f'style="background:{bg}; color:#ffffff; padding:3px 6px; '
+                                    f'border-radius:4px; text-decoration:none; font-size:8pt; '
+                                    f'font-weight:500; border:1px solid {brd};">{label}</a>'
+                                )
+                            actions = (
+                                btn(run_href, '#28a745', '#1e7e34', '▶ Run') + '&nbsp;'
+                                + btn(copy_href, '#6c757d', '#545b62', '📋 Copy') + '&nbsp;'
+                                + btn(open_href, '#007bff', '#0056b3', '📝 Editor')
+                            )
+                            title = f'PyQGIS Code Block #{i+1}'
+                            header = (
+                                '<div style="background:linear-gradient(135deg,#2d2d2d 0%,#1a1a1a 100%); color:#FFFFFF; padding:6px 10px; '
+                                'border:1px solid #333; border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; '
+                                'font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt; text-align:left;">'
+                                f'{title}<span style="display:inline-block; margin-left:12px; font-weight:normal;">{actions}</span>'
+                                '</div>'
+                            )
+                            pre = (
+                                '<pre style="background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; '
+                                'border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; margin:0; '
+                                'white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; overflow-x:auto;">'
+                                f'<code style="color:#f0f0f0; background:transparent; border:none; padding:0;">{esc}</code>'
+                                '</pre>'
+                            )
+                            styled_section = (
+                                f'<div style="margin:12px 0; border-radius:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.08);">{header}{pre}</div>'
+                            )
+
+                            # Try direct block replacement
+                            esc_cb = esc
+                            replaced = False
+                            if esc_cb in styled:
+                                styled = styled.replace(esc_cb, styled_section, 1)
+                                replaced = True
+                            else:
+                                # Try <br>-joined variant replacement
+                                esc_lines = [ _html.escape(l) for l in cb.splitlines() if l.strip() ]
+                                if esc_lines:
+                                    br_join = r'(?:\s*<br\s*/?>\s*)'
+                                    pat = br_join.join(_re.escape(l) for l in esc_lines)
+                                    # Allow optional wrapping tags between lines (very loose)
+                                    pat = pat.replace('\n', br_join)
+                                    rx = _re.compile(pat, _re.IGNORECASE)
+                                    if rx.search(styled):
+                                        styled = rx.sub(styled_section, styled, count=1)
+                                        replaced = True
+                                # As a last inline attempt: replace from the first to last non-empty line across any HTML
+                                if not replaced and len(esc_lines) >= 2:
+                                    head = _re.escape(esc_lines[0])
+                                    tail = _re.escape(esc_lines[-1])
+                                    rx2 = _re.compile(head + r'.*?' + tail, _re.IGNORECASE | _re.DOTALL)
+                                    if rx2.search(styled):
+                                        styled = rx2.sub(styled_section, styled, count=1)
+                                        replaced = True
+
+                            if not replaced:
+                                remaining_to_append.append(styled_section)
+
+                        if remaining_to_append:
+                            # Append any blocks we couldn't replace inline
+                            styled = styled + "\n" + "\n".join(remaining_to_append)
+            except Exception:
+                pass
 
             return styled
         except Exception:

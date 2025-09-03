@@ -14,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
     QToolTip, QDockWidget, QSizePolicy
 )
-from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont
+from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont, QTextDocument
 from qgis.core import QgsMessageLog, Qgis, QgsApplication
 
 from .gemini_api import GeminiAPI
@@ -526,7 +526,8 @@ class CopilotChatDialog(QDialog):
                 border: none;
                 font-family: 'Segoe UI', Arial, sans-serif;
                 font-size: 10pt;
-                padding: 5px;
+                padding: 8px;
+                line-height: 1.4;
             }
         """)
     
@@ -1346,10 +1347,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.render_message(sender, message, color, timestamp)
 
     def render_message(self, sender, message, color, timestamp):
-        """Renders a single message to the chat display"""
+        """Render a single chat message using Qt's native Markdown support when appropriate."""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
-        # Ensure a blank line separates every message in rendered view and copied text
+        # Ensure a blank line separates every message
         try:
             if self.chat_display.toPlainText().strip():
                 cursor.insertText("\n\n")
@@ -1360,26 +1361,48 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         is_system = (sender == "System")
         align = "right" if is_user else "left"
 
-        # Simple, unobtrusive palettes (default-like)
+        # Bubble palettes
         if is_user:
-            bubble_bg_color = "#e6f7ff"   # light blue
+            bubble_bg_color = "#e6f7ff"
             bubble_border_color = "#b3e0ff"
         elif is_system:
-            bubble_bg_color = "#f5f5f5"   # light gray
+            bubble_bg_color = "#f5f5f5"
             bubble_border_color = "#d9d9d9"
         else:
-            bubble_bg_color = "#f6ffed"   # light green for agent
+            bubble_bg_color = "#f6ffed"
             bubble_border_color = "#b7eb8f"
 
-        # Main div for alignment
+        # Build content using Markdown for AI messages by default; fallback heuristic otherwise
+        ai_message = (not is_user and not is_system)
+        try:
+            is_md = True if ai_message else (self.looks_like_markdown(message) if isinstance(message, str) else False)
+        except Exception:
+            is_md = ai_message
+
+        formatted_content = None
+        if is_md:
+            try:
+                temp_doc = QTextDocument()
+                temp_doc.setMarkdown(message)
+                html_content = temp_doc.toHtml()
+                html_content = self.extract_body_content(html_content)
+                formatted_content = self.style_markdown_html(html_content)
+            except Exception:
+                formatted_content = None
+        if not formatted_content:
+            try:
+                import html as _html
+                formatted_content = _html.escape(str(message)).replace('\n', '<br>')
+            except Exception:
+                formatted_content = str(message)
+
+        # Main div for alignment and bubble markup
         html = f'<div style="margin: 0 5px; text-align: {align};">'
-        
-        # The bubble
         html += f"""
         <div style="
             display: inline-block;
             text-align: left;
-            max-width: 85%;
+            max-width: 92%;
             padding: 8px 12px;
             border-radius: 12px;
             background-color: {bubble_bg_color};
@@ -1388,16 +1411,133 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             margin-bottom: 5px;
         ">
             <div>
-                <strong style="color: {color};">{sender}</strong>
-                <span style="color: #6c757d; font-size: 8pt;">({timestamp})</span>
+                <strong style=\"color: {color};\">{sender}</strong>
+                <span style=\"color: #6c757d; font-size: 8pt;\">({timestamp})</span>
             </div>
-            <div style="margin-top: 5px; white-space: pre-wrap; word-wrap: break-word;">{self.format_message_content(message)}</div>
+            <div style=\"margin-top: 5px;\">{formatted_content}</div>
         </div>
         </div>"""
 
         cursor.insertHtml(html)
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
+
+    def looks_like_markdown(self, text):
+        """Check if text contains markdown formatting indicators."""
+        try:
+            import re
+            if not isinstance(text, str):
+                return False
+            patterns = [
+                r'^#{1,6}\s+',          # headers
+                r'\*\*.*?\*\*',       # bold
+                r'\*[^\*\n].*?\*',    # italic
+                r'`[^`\n]+`',           # inline code
+                r'```[\s\S]*?```',     # fenced code blocks
+                r'^\s*[-*+]\s+',       # unordered lists
+                r'^\s*\d+\.\s+',     # ordered lists
+                r'^\s*>\s+',           # blockquotes
+                r'\[[^\]]+\]\([^\)]+\)',  # links
+                r'^(?:---+|\*\*\*+)$', # horizontal rules
+            ]
+            for pat in patterns:
+                if re.search(pat, text, re.MULTILINE):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def extract_body_content(self, html_text):
+        """Extract content from HTML body tag, removing document wrapper."""
+        try:
+            import re
+            m = re.search(r'<body[^>]*>([\s\S]*?)</body>', html_text, re.IGNORECASE)
+            if m:
+                content = m.group(1).strip()
+                # Relax paragraph margins if Qt injects them
+                content = re.sub(r'<p style=\"[^\"]*\">', '<p>', content)
+                return content
+            return html_text
+        except Exception:
+            return html_text
+
+    def style_markdown_html(self, html_text: str) -> str:
+        """Lightweight inline styling for Qt Markdown HTML to improve readability.
+
+        Ensures fenced code blocks render as black code boxes and improves spacing and
+        legibility of common elements (headings, lists, tables, blockquotes, links).
+        """
+        try:
+            import re
+
+            def ensure_style(tag: str, base_style: str, html_in: str) -> str:
+                # Merge with existing style (ours last so it wins on conflicts)
+                pattern_has = rf'<{tag}([^>]*?)style="([^"]*)"([^>]*)>'
+                html_out = re.sub(
+                    pattern_has,
+                    lambda m: f'<{tag}{m.group(1)}style="{m.group(2)}; {base_style}"{m.group(3)}>',
+                    html_in,
+                    flags=re.IGNORECASE,
+                )
+                pattern_no = rf'<{tag}(?![^>]*style=)([^>]*)>'
+                html_out = re.sub(
+                    pattern_no,
+                    rf'<{tag} \1 style="{base_style}">',
+                    html_out,
+                    flags=re.IGNORECASE,
+                )
+                return html_out
+
+            styled = html_text
+
+            # Headings
+            h_style = 'margin:6px 0 4px; color:#222; font-weight:600;'
+            for h in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                styled = ensure_style(h, h_style, styled)
+
+            # Paragraphs and lists
+            styled = ensure_style('p', 'margin:6px 0;', styled)
+            styled = ensure_style('ul', 'margin:6px 0 6px 18px;', styled)
+            styled = ensure_style('ol', 'margin:6px 0 6px 18px;', styled)
+            styled = ensure_style('li', 'margin:3px 0;', styled)
+
+            # Links and images
+            styled = ensure_style('a', 'color:#0b5ed7; text-decoration:underline;', styled)
+            styled = ensure_style('img', 'max-width:100%; height:auto; border-radius:4px;', styled)
+
+            # Blockquotes and rules
+            styled = ensure_style('blockquote', 'border-left:4px solid #d0d7de; padding-left:10px; margin:6px 0; color:#555; background:#f8f9fa; border-radius:4px;', styled)
+            styled = ensure_style('hr', 'border:none; border-top:1px solid #e0e0e0; margin:8px 0;', styled)
+
+            # Tables
+            styled = ensure_style('table', 'border-collapse:collapse; margin:6px 0; width:auto;', styled)
+            styled = ensure_style('th', 'border:1px solid #ddd; padding:4px 8px; background:#f1f3f5; text-align:left;', styled)
+            styled = ensure_style('td', 'border:1px solid #ddd; padding:4px 8px;', styled)
+
+            # Code blocks and inline code
+            pre_style = 'background:#000000; color:#EEEEEE; border:1px solid #000; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Menlo,monospace; font-size:9pt;'
+            code_style = 'background:#f0f2f5; color:#c7254e; padding:2px 4px; border-radius:3px; font-family:Consolas,Menlo,monospace; font-size:9pt;'
+
+            # Protect <pre> blocks while styling inline <code>
+            pre_blocks = []
+            def _stash_pre(m):
+                pre_blocks.append(m.group(0))
+                return f"__PRE_BLOCK_{len(pre_blocks)-1}__"
+            protected = re.sub(r'<pre[\s\S]*?</pre>', _stash_pre, styled, flags=re.IGNORECASE)
+
+            # Style inline code (outside pre)
+            protected = ensure_style('code', code_style, protected)
+
+            # Restore pre blocks and style them as black code boxes
+            def _restore_pre(m):
+                idx = int(m.group(1))
+                return pre_blocks[idx]
+            restored = re.sub(r'__PRE_BLOCK_(\d+)__', _restore_pre, protected)
+            styled = ensure_style('pre', pre_style, restored)
+
+            return styled
+        except Exception:
+            return html_text
 
     # Removed: save_chat and load_chat (chat file I/O no longer supported)
 

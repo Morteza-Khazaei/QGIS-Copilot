@@ -1408,16 +1408,8 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             pass
         
-        # Add to display with explicit message id available for header actions
-        try:
-            self._current_render_msg_id = msg_id
-        except Exception:
-            pass
+        # Add to display
         self.render_message(sender, message, color, timestamp)
-        try:
-            del self._current_render_msg_id
-        except Exception:
-            pass
 
     def render_message(self, sender, message, color, timestamp):
         """Render a single chat message using Qt's native Markdown support when appropriate."""
@@ -1461,8 +1453,14 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 temp_doc.setMarkdown(message_md)
                 html_content = temp_doc.toHtml()
                 html_content = self.extract_body_content(html_content)
-                # If this is an AI message, attach per-code-block actions using current message id
-                mid = getattr(self, '_current_render_msg_id', None)
+                # If this is an AI message, attach per-code-block actions
+                mid = None
+                try:
+                    # Lookup last inserted history id
+                    if len(self.chat_history) > 0:
+                        mid = self.chat_history[-1].get('id')
+                except Exception:
+                    mid = None
                 formatted_content = self.style_markdown_html(html_content, mid=mid)
             except Exception:
                 formatted_content = None
@@ -1896,6 +1894,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
 
     # Removed: logs tab utilities (refresh, clear history, export, statistics)
 
+    def request_manual_improvement(self):
+        """Manually trigger a request for AI to improve the last failed code."""
+        self.request_ai_improvement()
+
     def on_retry_clicked(self):
         """Retry behavior: if a failed run exists, request improvement; otherwise resend last user query."""
         try:
@@ -1936,119 +1938,71 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 return
             # If already docked, just raise it
             if hasattr(self, '_copilot_main_dock') and self._copilot_main_dock:
-                try:
-                    self._copilot_main_dock.raise_()
-                    return
-                except Exception:
-                    pass
+                self._copilot_main_dock.raise_()
+                return
+
             dock = QDockWidget("QGIS Copilot", mainwin)
             dock.setObjectName("QGISCopilotMainDock")
-            try:
-                # Make it movable/floatable/closable
-                dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-                dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
-                # Avoid enforcing minimums; let the splitter control size freely
-                dock.setMinimumSize(0, 0)
-                dock.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                # Ensure closing the dock does not delete it, so we can show it again
-                dock.setAttribute(Qt.WA_DeleteOnClose, False)
-                # No checkbox to sync; rely on plugin action to reopen hidden dock
-            except Exception:
-                pass
+            # Make it movable/floatable/closable
+            dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+            dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+            # Avoid enforcing minimums; let the splitter control size freely
+            dock.setMinimumSize(0, 0)
+            dock.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Ensure closing the dock does not delete it, so we can show it again
+            dock.setAttribute(Qt.WA_DeleteOnClose, False)
+            # No checkbox to sync; rely on plugin action to reopen hidden dock
             # Reparent this dialog into the dock
             self.setParent(dock)
-            try:
-                self.setWindowFlags(Qt.Widget)
-                # Remove dialog minimums so users can freely resize the bottom area
-                self.setMinimumSize(0, 0)
-                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                # Loosen minimums on large inner widgets so the tab can shrink
-                try:
-                    if hasattr(self, 'chat_display') and self.chat_display is not None:
-                        self.chat_display.setMinimumHeight(0)
-                        self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'execution_display') and self.execution_display is not None:
-                        self.execution_display.setMinimumHeight(0)
-                        self.execution_display.setMinimumWidth(0)
-                        self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                except Exception:
-                    pass
-                # Allow the System Prompt editor and tabs to expand with the dock height
-                try:
-                    if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
-                        self.system_prompt_input.setMinimumHeight(0)
-                        self.system_prompt_input.setMaximumHeight(16777215)
-                        self.system_prompt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'tab_widget') and self.tab_widget is not None:
-                        self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            self.setWindowFlags(Qt.Widget)
+            # Remove dialog minimums so users can freely resize the bottom area
+            self.setMinimumSize(0, 0)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Loosen minimums on large inner widgets so the tab can shrink
+            if hasattr(self, 'chat_display') and self.chat_display is not None:
+                self.chat_display.setMinimumHeight(0)
+                self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            if hasattr(self, 'execution_display') and self.execution_display is not None:
+                self.execution_display.setMinimumHeight(0)
+                self.execution_display.setMinimumWidth(0)
+                self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Allow the System Prompt editor and tabs to expand with the dock height
+            if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
+                self.system_prompt_input.setMinimumHeight(0)
+                self.system_prompt_input.setMaximumHeight(16777215)
+                self.system_prompt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            if hasattr(self, 'tab_widget') and self.tab_widget is not None:
+                self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             dock.setWidget(self)
             # Integrate with QGIS docking system so users can drag/tab it like built-in panels
             # Choose initial area from user preference (default bottom)
-            try:
-                saved_area = int(QSettings().value("qgis_copilot/dock_area", int(Qt.BottomDockWidgetArea)))
-            except Exception:
-                saved_area = int(Qt.BottomDockWidgetArea)
-            try:
-                self.iface.addDockWidget(saved_area, dock)
-            except Exception:
-                mainwin.addDockWidget(saved_area, dock)
+            saved_area = int(QSettings().value("qgis_copilot/dock_area", int(Qt.BottomDockWidgetArea)))
+            self.iface.addDockWidget(saved_area, dock)
             # Tabify with Log Messages and Python Console if present
-            try:
-                from qgis.PyQt.QtWidgets import QDockWidget as _QD
-                docks = mainwin.findChildren(_QD)
-                log_dock = None
-                console_dock = None
-                for d in docks:
-                    title = d.windowTitle() or ""
-                    if "Log" in title and "Message" in title:
-                        log_dock = d
-                    if "Python" in title and "Console" in title:
-                        console_dock = d
-                # Prefer to tab with Log/Console if they are in the target area
-                target = None
-                if log_dock and mainwin.dockWidgetArea(log_dock) == saved_area:
-                    target = log_dock
-                elif console_dock and mainwin.dockWidgetArea(console_dock) == saved_area:
-                    target = console_dock
-                
-                # If no specific target, find any other dock in the target area to tab with
-                if not target:
-                    for d in docks:
-                        if d is not dock and mainwin.dockWidgetArea(d) == saved_area:
-                            target = d
-                            break
-                
-                if target:
-                    mainwin.tabifyDockWidget(target, dock)
-            except Exception:
-                pass
+            from qgis.PyQt.QtWidgets import QDockWidget as _QD
+            docks = mainwin.findChildren(_QD)
+            log_dock = next((d for d in docks if "Log" in d.windowTitle() and "Message" in d.windowTitle()), None)
+            console_dock = next((d for d in docks if "Python" in d.windowTitle() and "Console" in d.windowTitle()), None)
+            target = None
+            if log_dock and mainwin.dockWidgetArea(log_dock) == saved_area:
+                target = log_dock
+            elif console_dock and mainwin.dockWidgetArea(console_dock) == saved_area:
+                target = console_dock
+            else:
+                target = next((d for d in docks if d is not dock and mainwin.dockWidgetArea(d) == saved_area), None)
+            if target:
+                mainwin.tabifyDockWidget(target, dock)
             # Remember and show dock
             self._copilot_main_dock = dock
             dock.show()
             # Do not force an initial height here; let QGIS manage splitter sizes
             # If previously opened as a modal dialog, close the loop; otherwise ensure visible
-            try:
-                if hasattr(self, 'isModal') and self.isModal():
-                    self.accept()
-                else:
-                    self.show()
-            except Exception:
-                try:
-                    self.show()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            if hasattr(self, 'isModal') and self.isModal():
+                self.accept()
+            else:
+                self.show()
+        except Exception as e:
+            QgsMessageLog.logMessage(f"Error docking Copilot panel: {e}", "QGIS Copilot", level=Qgis.Warning)
 
     def ensure_code_editor_dock(self, code_text: str = ""):
         """Ensure there is a docked code editor and tabify it with common docks."""
@@ -2096,8 +2050,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             pass
 
     # Removed: on_open_in_editor — replaced by per-code-block Open in Editor actions
-
-
+    
     def on_undock_copilot_panel(self):
         """Restore Copilot to its original floating dialog form."""
         try:
@@ -2157,4 +2110,91 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             pass
     # Removed: Dock toggle checkbox handlers (auto-docking is enabled)
 
-    # Removed: on_dock_code_editor (unused)
+    def on_dock_code_editor(self):
+        """Open the current script in the QGIS Python Console code editor."""
+        try:
+            # Ensure there is a saved script; save from last response if needed
+            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
+                if hasattr(self, 'last_response') and self.last_response:
+                    filename_hint = None
+                    for item in reversed(self.chat_history):
+                        if item.get('sender') == 'You':
+                            filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                            break
+                    try:
+                        self._last_saved_task_path = self.pyqgis_executor.save_response_to_task_file(
+                            self.last_response, filename_hint=filename_hint
+                        )
+                    except Exception:
+                        self._last_saved_task_path = None
+            if not getattr(self, '_last_saved_task_path', None) or not os.path.exists(self._last_saved_task_path):
+                QMessageBox.information(self, "Info", "No saved script available yet. Send a message to generate code first.")
+                return
+
+            # Show Python Console
+            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
+                try:
+                    self.iface.actionShowPythonDialog().trigger()
+                except Exception:
+                    pass
+
+            # Try to load the file into the Python Console editor
+            import qgis.utils as qutils
+            pc = None
+            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                pc = qutils.plugins.get('PythonConsole') or qutils.plugins.get('pythonconsole')
+                if not pc:
+                    for k, v in qutils.plugins.items():
+                        if 'python' in k.lower() and 'console' in k.lower():
+                            pc = v
+                            break
+            # Ensure editor is visible
+            for act_name in ('actionShowEditor', 'actionEditor', 'toggleEditor', 'showEditor'):
+                act = getattr(pc, act_name, None)
+                if act:
+                    try:
+                        if hasattr(act, 'setChecked'):
+                            act.setChecked(True)
+                        if hasattr(act, 'trigger'):
+                            act.trigger()
+                    except Exception:
+                        pass
+            # Try direct file open methods
+            loaded = False
+            for meth in ('openFileInEditor', 'openScriptFile', 'loadScript', 'addToEditor'):
+                fn = getattr(pc, meth, None)
+                if callable(fn):
+                    try:
+                        fn(self._last_saved_task_path)
+                        loaded = True
+                        break
+                    except Exception:
+                        pass
+            # Final fallback: run a snippet inside console context to open the file
+            if not loaded:
+                console = getattr(pc, 'console', None)
+                if console and hasattr(console, 'runCommand'):
+                    fp = self._last_saved_task_path.replace('\\', '/').replace("'", "\'")
+                    cmd = f"""# Copilot: open file in Python Console editor
+import qgis.utils as _qutils
+_pc = _qutils.plugins.get('PythonConsole') or _qutils.plugins.get('pythonconsole')
+for _a in ('actionShowEditor','actionEditor','toggleEditor','showEditor'):
+    _act = getattr(_pc, _a, None)
+    if _act:
+        getattr(_act, 'setChecked', lambda *_: None)(True)
+        getattr(_act, 'trigger', lambda *_: None)()
+for _m in ('openFileInEditor','openScriptFile','loadScript','addToEditor'):
+    _fn = getattr(_pc, _m, None)
+    if callable(_fn):
+        try:
+            _fn(r'{fp}')
+            break
+        except Exception:
+            pass
+"""
+                    try:
+                        console.runCommand(cmd)
+                    except Exception:
+                        pass
+        except Exception:
+            pass

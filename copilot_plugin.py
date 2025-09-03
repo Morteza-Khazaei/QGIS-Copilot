@@ -137,7 +137,7 @@ class QGISCopilotPlugin:
                 QMessageBox.information(
                     self.iface.mainWindow(),
                     "Welcome to QGIS Copilot!",
-                    "Welcome to QGIS Copilot! To get started, please configure an API key (e.g., for Google Gemini, OpenAI, or Anthropic Claude) in the Settings tab."
+                    "Welcome to QGIS Copilot! To get started, please configure an API key (e.g., for Google Gemini, OpenAI, or Anthropic Claude) in the AI tab."
                 )
         except Exception:
             pass

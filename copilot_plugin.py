@@ -3,7 +3,7 @@ QGIS Copilot Plugin - Main Plugin File
 """
 
 import os
-from qgis.PyQt.QtCore import QTranslator, QCoreApplication
+from qgis.PyQt.QtCore import QTranslator, QCoreApplication, QSettings, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.core import QgsApplication
@@ -87,6 +87,12 @@ class QGISCopilotPlugin:
 
         # Will be set False in run()
         self.first_start = True
+
+        # Auto-open on startup if configured
+        settings = QSettings()
+        if settings.value("qgis_copilot/prefs/open_on_startup", True, type=bool):
+            # Use a timer to ensure the QGIS GUI is fully loaded before docking
+            QTimer.singleShot(200, self.run)
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""

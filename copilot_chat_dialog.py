@@ -149,7 +149,7 @@ class CopilotChatDialog(QDialog):
         self.setLayout(main_layout)
 
         # Allow the dialog to be resizable by setting the layout's size constraint
-        self.layout().setSizeConstraint(QLayout.SetDefaultConstraint)
+        self.layout().setSizeConstraint(QLayout.SetNoConstraint)
 
     def minimize_window(self):
         """Minimize the dialog window."""
@@ -337,6 +337,11 @@ class CopilotChatDialog(QDialog):
         self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
         grid.addWidget(self.include_context_cb, 0, 0)
         grid.addWidget(self.include_logs_cb, 1, 0)
+
+        # Startup behavior
+        self.open_on_startup_cb = QCheckBox("Open panel on QGIS startup")
+        self.open_on_startup_cb.setToolTip("Automatically open and dock the Copilot panel when QGIS starts.")
+        grid.addWidget(self.open_on_startup_cb, 2, 0)
 
         # Execution behavior options (right column)
         self.auto_execute_cb = QCheckBox("Auto-execute Code")
@@ -917,6 +922,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", True, type=bool))
         self.relaxed_safety_cb.setChecked(settings.value("qgis_copilot/prefs/relaxed_safety", False, type=bool))
         self.include_docs_cb.setChecked(settings.value("qgis_copilot/prefs/include_docs", True, type=bool))
+        self.open_on_startup_cb.setChecked(settings.value("qgis_copilot/prefs/open_on_startup", True, type=bool))
         self.auto_feedback_enabled = self.auto_feedback_cb.isChecked()
 
         # Persist on change
@@ -927,6 +933,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.run_in_console_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/run_in_console", v))
         self.relaxed_safety_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/relaxed_safety", v))
         self.include_docs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_docs", v))
+        self.open_on_startup_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/open_on_startup", v))
 
     def load_workspace_dir(self):
         """Load the workspace directory from settings into the UI."""
@@ -1663,7 +1670,6 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             self.pyqgis_executor.suggest_improvement(self.pending_failed_execution)
             self.pending_failed_execution = None
 
-
     def on_dock_copilot_panel(self):
         """Dock the Copilot window as a tab alongside Log Messages and Python Console."""
         try:
@@ -1729,10 +1735,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 pass
             dock.setWidget(self)
             # Integrate with QGIS docking system so users can drag/tab it like built-in panels
+            # Choose initial area from user preference (default bottom)
             try:
-                self.iface.addDockWidget(Qt.BottomDockWidgetArea, dock)
+                saved_area = int(QSettings().value("qgis_copilot/dock_area", int(Qt.BottomDockWidgetArea)))
             except Exception:
-                mainwin.addDockWidget(Qt.BottomDockWidgetArea, dock)
+                saved_area = int(Qt.BottomDockWidgetArea)
+            try:
+                self.iface.addDockWidget(saved_area, dock)
+            except Exception:
+                mainwin.addDockWidget(saved_area, dock)
             # Tabify with Log Messages and Python Console if present
             try:
                 from qgis.PyQt.QtWidgets import QDockWidget as _QD
@@ -1745,20 +1756,20 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                         log_dock = d
                     if "Python" in title and "Console" in title:
                         console_dock = d
-                # Prefer explicit matches; otherwise fall back to any bottom-area dock
-                target = log_dock or console_dock
+                # Prefer to tab with Log/Console if they are in the target area
+                target = None
+                if log_dock and mainwin.dockWidgetArea(log_dock) == saved_area:
+                    target = log_dock
+                elif console_dock and mainwin.dockWidgetArea(console_dock) == saved_area:
+                    target = console_dock
+                
+                # If no specific target, find any other dock in the target area to tab with
                 if not target:
-                    try:
-                        # Pick the first dock already in the bottom area
-                        for d in docks:
-                            if d is dock:
-                                continue
-                            area = mainwin.dockWidgetArea(d)
-                            if area == Qt.BottomDockWidgetArea:
-                                target = d
-                                break
-                    except Exception:
-                        target = None
+                    for d in docks:
+                        if d is not dock and mainwin.dockWidgetArea(d) == saved_area:
+                            target = d
+                            break
+                
                 if target:
                     mainwin.tabifyDockWidget(target, dock)
             except Exception:

@@ -99,21 +99,47 @@ class QGISCopilotPlugin:
     def run(self):
         """Run method that performs all the real work"""
         
-        # Create the dialog with elements (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
+        # Create dialog once
         if self.first_start:
             self.first_start = False
             self.dialog = CopilotChatDialog(self.iface)
+            # Open as a dock by default so users can drag/resize like other panels
+            try:
+                self.dialog.on_dock_copilot_panel()
+                return
+            except Exception:
+                pass
+
+        # If Copilot is docked, just show/raise the dock and return without modal exec
+        try:
+            dock = getattr(self.dialog, '_copilot_main_dock', None)
+            if dock is not None:
+                dock.show()
+                try:
+                    dock.raise_()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
 
         # Check if any API key is configured
-        if not self.dialog.gemini_api.get_api_key() and not self.dialog.openai_api.get_api_key() and not self.dialog.claude_api.get_api_key():
-            QMessageBox.information(
-                self.iface.mainWindow(),
-                "Welcome to QGIS Copilot!",
-                "Welcome to QGIS Copilot! To get started, please configure an API key (e.g., for Google Gemini, OpenAI, or Anthropic Claude) in the Settings tab."
-            )
+        try:
+            if (not self.dialog.gemini_api.get_api_key() and
+                not self.dialog.openai_api.get_api_key() and
+                not self.dialog.claude_api.get_api_key()):
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "Welcome to QGIS Copilot!",
+                    "Welcome to QGIS Copilot! To get started, please configure an API key (e.g., for Google Gemini, OpenAI, or Anthropic Claude) in the Settings tab."
+                )
+        except Exception:
+            pass
 
-        # Show the dialog
+        # Show as modal dialog when not docked
         self.dialog.show()
-        # Run the dialog event loop
-        result = self.dialog.exec_()
+        try:
+            self.dialog.exec_()
+        except Exception:
+            # Fallback: non-modal if exec_ not appropriate
+            pass

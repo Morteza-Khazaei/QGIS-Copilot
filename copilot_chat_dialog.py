@@ -10,9 +10,9 @@ from datetime import datetime
 from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QSettings
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QTextEdit, QLineEdit,
-    QPushButton, QSplitter, QLabel, QCheckBox, QGroupBox,
+    QPushButton, QToolButton, QMenu, QSplitter, QLabel, QCheckBox, QGroupBox,
     QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
-    QToolTip
+    QToolTip, QDockWidget, QSizePolicy
 )
 from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont
 from qgis.core import QgsMessageLog, Qgis, QgsApplication
@@ -95,6 +95,10 @@ class CopilotChatDialog(QDialog):
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self.request_ai_improvement)
         self.pending_failed_execution = None
+        # Docked code editor (Copilot) tracking
+        self._code_editor_dock = None
+        self._code_editor_widget = None
+        self._last_saved_task_path = None
         # Track save-prompting per task file
         self._last_prompted_task_file = None
         # Track last saved script path for Execute Last Code
@@ -179,9 +183,13 @@ class CopilotChatDialog(QDialog):
         chat_container = QWidget()
         chat_layout = QVBoxLayout()
         
-        # Chat display area
+        # Chat display area (fully resizable)
         self.chat_display = QTextBrowser()
-        self.chat_display.setMinimumHeight(350)
+        try:
+            self.chat_display.setMinimumHeight(0)
+            self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
         self.setup_chat_display_style()
         chat_layout.addWidget(self.chat_display)
         
@@ -195,7 +203,14 @@ class CopilotChatDialog(QDialog):
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self.send_message)
         
-        self.execute_button = QPushButton("Execute Last Code")
+        self.execute_button = QToolButton()
+        self.execute_button.setText("Run")
+        self.execute_button.setToolTip("Run the last generated script")
+        self.execute_button.setPopupMode(QToolButton.MenuButtonPopup)
+        run_menu = QMenu(self.execute_button)
+        open_action = run_menu.addAction("Open in Editor")
+        open_action.triggered.connect(self.on_open_in_editor)
+        self.execute_button.setMenu(run_menu)
         self.execute_button.clicked.connect(self.execute_last_code)
         self.execute_button.setEnabled(False)
         
@@ -217,7 +232,7 @@ class CopilotChatDialog(QDialog):
         improve_last_button = QPushButton("Request Improvement")
         improve_last_button.clicked.connect(self.request_manual_improvement)
         improve_last_button.setToolTip("Ask AI to improve the last failed code execution")
-        
+
         chat_management_layout.addWidget(clear_all_button)
         chat_management_layout.addWidget(improve_last_button)
         chat_management_layout.addStretch()
@@ -236,7 +251,12 @@ class CopilotChatDialog(QDialog):
 
         # Create the display widget before connecting signals to it
         self.execution_display = QTextEdit()
-        self.execution_display.setMinimumWidth(350)
+        try:
+            self.execution_display.setMinimumWidth(0)
+            self.execution_display.setMinimumHeight(0)
+            self.execution_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
         self.execution_display.setReadOnly(True)
         self.execution_display.setFont(QFont("Consolas", 10))
         # Terminal-like black panel for live logs
@@ -258,8 +278,14 @@ class CopilotChatDialog(QDialog):
         execution_container.setLayout(execution_layout)
         splitter.addWidget(execution_container)
         
-        # Set splitter sizes
-        splitter.setSizes([600, 400])
+        # Set splitter behavior for proportional resizing
+        try:
+            splitter.setChildrenCollapsible(False)
+            splitter.setStretchFactor(0, 3)  # chat side
+            splitter.setStretchFactor(1, 2)  # logs side
+        except Exception:
+            # Fallback to an initial ratio
+            splitter.setSizes([600, 400])
         
         layout.addWidget(splitter)
         
@@ -474,12 +500,13 @@ class CopilotChatDialog(QDialog):
         self.system_prompt_input = QTextEdit()
         self.system_prompt_input.setAcceptRichText(False)
         # Fix visible height to roughly 10 lines; let editor scroll internally
-        try:
-            line_height = self.system_prompt_input.fontMetrics().lineSpacing()
-            target_height = int(line_height * 10 + 12)
-            self.system_prompt_input.setFixedHeight(target_height)
-        except Exception:
-            self.system_prompt_input.setFixedHeight(220)
+        # try:
+        #     line_height = self.system_prompt_input.fontMetrics().lineSpacing()
+        #     target_height = int(line_height * 10 + 12)
+        #     self.system_prompt_input.setFixedHeight(target_height)
+        # except Exception:
+        #     self.system_prompt_input.setFixedHeight(220)
+        self.system_prompt_input.setFixedHeight(100)
 
         self.system_prompt_input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.system_prompt_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1508,3 +1535,226 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         if self.pending_failed_execution:
             self.pyqgis_executor.suggest_improvement(self.pending_failed_execution)
             self.pending_failed_execution = None
+
+
+    def on_dock_copilot_panel(self):
+        """Dock the Copilot window as a tab alongside Log Messages and Python Console."""
+        try:
+            mainwin = self.iface.mainWindow() if self.iface else None
+            if not mainwin:
+                return
+            # If already docked, just raise it
+            if hasattr(self, '_copilot_main_dock') and self._copilot_main_dock:
+                try:
+                    self._copilot_main_dock.raise_()
+                    return
+                except Exception:
+                    pass
+            dock = QDockWidget("QGIS Copilot", mainwin)
+            dock.setObjectName("QGISCopilotMainDock")
+            try:
+                # Make it movable/floatable/closable
+                dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+                dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+                # Avoid enforcing minimums; let the splitter control size freely
+                dock.setMinimumSize(0, 0)
+                dock.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                # Ensure closing the dock does not delete it, so we can show it again
+                dock.setAttribute(Qt.WA_DeleteOnClose, False)
+                # No checkbox to sync; rely on plugin action to reopen hidden dock
+            except Exception:
+                pass
+            # Reparent this dialog into the dock
+            self.setParent(dock)
+            try:
+                self.setWindowFlags(Qt.Widget)
+                # Remove dialog minimums so users can freely resize the bottom area
+                self.setMinimumSize(0, 0)
+                self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                # Loosen minimums on large inner widgets so the tab can shrink
+                try:
+                    if hasattr(self, 'chat_display') and self.chat_display is not None:
+                        self.chat_display.setMinimumHeight(0)
+                        self.chat_display.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'execution_display') and self.execution_display is not None:
+                        self.execution_display.setMinimumHeight(0)
+                        self.execution_display.setMinimumWidth(0)
+                        self.execution_display.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                except Exception:
+                    pass
+                # Allow the System Prompt editor and tabs to expand with the dock height
+                try:
+                    if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
+                        self.system_prompt_input.setMinimumHeight(0)
+                        self.system_prompt_input.setMaximumHeight(16777215)
+                        self.system_prompt_input.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'tab_widget') and self.tab_widget is not None:
+                        self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            dock.setWidget(self)
+            # Integrate with QGIS docking system so users can drag/tab it like built-in panels
+            try:
+                self.iface.addDockWidget(Qt.BottomDockWidgetArea, dock)
+            except Exception:
+                mainwin.addDockWidget(Qt.BottomDockWidgetArea, dock)
+            # Tabify with Log Messages and Python Console if present
+            try:
+                from qgis.PyQt.QtWidgets import QDockWidget as _QD
+                docks = mainwin.findChildren(_QD)
+                log_dock = None
+                console_dock = None
+                for d in docks:
+                    title = d.windowTitle() or ""
+                    if "Log" in title and "Message" in title:
+                        log_dock = d
+                    if "Python" in title and "Console" in title:
+                        console_dock = d
+                # Prefer explicit matches; otherwise fall back to any bottom-area dock
+                target = log_dock or console_dock
+                if not target:
+                    try:
+                        # Pick the first dock already in the bottom area
+                        for d in docks:
+                            if d is dock:
+                                continue
+                            area = mainwin.dockWidgetArea(d)
+                            if area == Qt.BottomDockWidgetArea:
+                                target = d
+                                break
+                    except Exception:
+                        target = None
+                if target:
+                    mainwin.tabifyDockWidget(target, dock)
+            except Exception:
+                pass
+            # Remember and show dock
+            self._copilot_main_dock = dock
+            dock.show()
+            # Do not force an initial height here; let QGIS manage splitter sizes
+            # If previously opened as a modal dialog, close the loop; otherwise ensure visible
+            try:
+                if hasattr(self, 'isModal') and self.isModal():
+                    self.accept()
+                else:
+                    self.show()
+            except Exception:
+                try:
+                    self.show()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def ensure_code_editor_dock(self, code_text: str = ""):
+        """Ensure there is a docked code editor and tabify it with common docks."""
+        try:
+            mainwin = self.iface.mainWindow() if self.iface else None
+            if not mainwin:
+                return
+            if not self._code_editor_dock:
+                dock = QDockWidget("Copilot Code Editor", mainwin)
+                editor = QTextEdit(dock)
+                editor.setAcceptRichText(False)
+                try:
+                    editor.setFont(QFont("Consolas", 10))
+                except Exception:
+                    pass
+                dock.setWidget(editor)
+                dock.setObjectName("CopilotCodeEditorDock")
+                mainwin.addDockWidget(Qt.BottomDockWidgetArea, dock)
+                self._code_editor_dock = dock
+                self._code_editor_widget = editor
+                # Try to tabify with Log Messages or Python Console if found
+                try:
+                    from qgis.PyQt.QtWidgets import QDockWidget as _QD
+                    docks = mainwin.findChildren(_QD)
+                    log_dock = None
+                    console_dock = None
+                    for d in docks:
+                        title = d.windowTitle() or ""
+                        if "Log Messages" in title:
+                            log_dock = d
+                        if "Python Console" in title:
+                            console_dock = d
+                    if log_dock:
+                        mainwin.tabifyDockWidget(log_dock, dock)
+                    elif console_dock:
+                        mainwin.tabifyDockWidget(console_dock, dock)
+                except Exception:
+                    pass
+            # Update content and raise dock
+            if self._code_editor_widget is not None and isinstance(code_text, str) and code_text:
+                self._code_editor_widget.setPlainText(code_text)
+            if self._code_editor_dock:
+                self._code_editor_dock.raise_()
+        except Exception:
+            pass
+
+    def on_open_in_editor(self):
+        """Open the latest saved script in the Python Console editor without running it."""
+        self.on_dock_code_editor()
+
+
+    def on_undock_copilot_panel(self):
+        """Restore Copilot to its original floating dialog form."""
+        try:
+            mainwin = self.iface.mainWindow() if self.iface else None
+            dock = getattr(self, '_copilot_main_dock', None)
+            if dock and mainwin:
+                try:
+                    dock.hide()
+                    dock.setWidget(None)
+                    mainwin.removeDockWidget(dock)
+                except Exception:
+                    pass
+                try:
+                    dock.deleteLater()
+                except Exception:
+                    pass
+                self._copilot_main_dock = None
+            # Reparent to top-level and restore dialog flags/sizing
+            try:
+                self.setParent(None)
+                self.setWindowFlags(Qt.Dialog | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+                self.setMinimumSize(800, 600)
+                self.resize(1000, 700)
+                # Set inner widgets back to reasonable minimums
+                try:
+                    if hasattr(self, 'chat_display') and self.chat_display is not None:
+                        self.chat_display.setMinimumHeight(100)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'execution_display') and self.execution_display is not None:
+                        self.execution_display.setMinimumHeight(0)
+                except Exception:
+                    pass
+                # Restore a compact prompt editor height for dialog mode
+                try:
+                    if hasattr(self, 'system_prompt_input') and self.system_prompt_input is not None:
+                        self.system_prompt_input.setMaximumHeight(100)
+                except Exception:
+                    pass
+                self.show()
+            except Exception:
+                pass
+            # Reflect UI toggle if present
+            try:
+                if hasattr(self, 'dock_copilot_cb') and self.dock_copilot_cb is not None:
+                    self.dock_copilot_cb.blockSignals(True)
+                    self.dock_copilot_cb.setChecked(False)
+                    self.dock_copilot_cb.blockSignals(False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Removed: Dock toggle checkbox handlers (auto-docking is enabled)

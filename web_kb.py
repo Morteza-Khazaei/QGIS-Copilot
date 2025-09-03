@@ -12,7 +12,10 @@ import json
 import time
 from datetime import datetime, timedelta
 
-import requests
+try:
+    import requests
+except Exception:
+    requests = None
 from qgis.core import QgsMessageLog, Qgis
 
 
@@ -81,6 +84,9 @@ def _extract_sections(html, page_url):
 
 def fetch_and_cache(max_link_pages=8):
     """Fetch index and up to N linked pages; cache compact section summaries."""
+    if requests is None:
+        QgsMessageLog.logMessage("Requests module not available; skipping docs fetch.", "QGIS Copilot", level=Qgis.Warning)
+        return False
     try:
         resp = requests.get(BASE_URL, timeout=(5, 15))
         resp.raise_for_status()

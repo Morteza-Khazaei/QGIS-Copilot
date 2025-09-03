@@ -14,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox, QTabWidget, QWidget, QTextBrowser, QProgressBar, QFileDialog, QComboBox,
     QToolTip, QDockWidget, QSizePolicy
 )
-from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont, QTextDocument
+from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont, QTextDocument, QGuiApplication
 from qgis.core import QgsMessageLog, Qgis, QgsApplication
 
 from .gemini_api import GeminiAPI
@@ -218,8 +218,18 @@ class CopilotChatDialog(QDialog):
         self.execute_button.clicked.connect(self.execute_last_code)
         self.execute_button.setEnabled(False)
         
+        # Retry button: disabled until a failure happens
+        self.retry_button = QPushButton("Retry")
+        self.retry_button.clicked.connect(self.on_retry_clicked)
+        self.retry_button.setToolTip("Ask AI to fix the last failed run and retry")
+        try:
+            self.retry_button.setEnabled(False)
+        except Exception:
+            pass
+
         input_layout.addWidget(self.message_input)
         input_layout.addWidget(self.send_button)
+        input_layout.addWidget(self.retry_button)
         input_layout.addWidget(self.execute_button)
         
         chat_layout.addLayout(input_layout)
@@ -232,18 +242,8 @@ class CopilotChatDialog(QDialog):
         clear_all_button = QPushButton("Clear All")
         clear_all_button.setToolTip("Clear chat history and live logs")
         clear_all_button.clicked.connect(self.clear_all)
-        
-        # Retry button: disabled until a failure happens
-        self.retry_button = QPushButton("Retry")
-        self.retry_button.clicked.connect(self.on_retry_clicked)
-        self.retry_button.setToolTip("Ask AI to fix the last failed run and retry")
-        try:
-            self.retry_button.setEnabled(False)
-        except Exception:
-            pass
 
         chat_management_layout.addWidget(clear_all_button)
-        chat_management_layout.addWidget(self.retry_button)
         chat_management_layout.addStretch()
         chat_layout.addLayout(chat_management_layout)
         
@@ -530,16 +530,23 @@ class CopilotChatDialog(QDialog):
     
     def setup_chat_display_style(self):
         """Setup styling for the chat display (QGIS default-like)"""
-        self.chat_display.setStyleSheet("""
-            QTextBrowser {
+        font_size = getattr(self, 'chat_font_size', '10pt')
+        self.chat_display.setStyleSheet(f"""
+            QTextBrowser {{
                 background-color: #ffffff;
                 border: none;
                 font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 10pt;
+                font-size: {font_size};
                 padding: 8px;
                 line-height: 1.4;
-            }
+            }}
         """)
+        try:
+            # Route link clicks to our handler (for copilot:// actions)
+            self.chat_display.setOpenLinks(False)
+            self.chat_display.setOpenExternalLinks(False)
+        except Exception:
+            pass
     
     def connect_signals(self):
         """Connect all signals"""
@@ -586,9 +593,49 @@ class CopilotChatDialog(QDialog):
 
         if hasattr(self.current_api, 'set_model'):
             self.current_api.set_model(model_name)
+
     def handle_anchor_click(self, url):
         """Handle clicks on links in the chat display."""
-        # Open external links in a browser
+        try:
+            if url.scheme().lower() == 'copilot':
+                action = (url.host() or '').lower()
+                # Parse query
+                from qgis.PyQt.QtCore import QUrlQuery
+                q = QUrlQuery(url)
+                mid = int(q.queryItemValue('mid')) if q.hasQueryItem('mid') else None
+                idx = int(q.queryItemValue('i')) if q.hasQueryItem('i') else 0
+                if action in ('run', 'open', 'copy') and mid is not None:
+                    # Resolve code block
+                    code = None
+                    try:
+                        blocks = getattr(self, '_code_blocks_by_msg', {}).get(mid) if hasattr(self, '_code_blocks_by_msg') else None
+                        if (blocks is None or idx >= len(blocks)) and 0 <= mid-1 < len(self.chat_history):
+                            raw = self.chat_history[mid-1].get('message')
+                            blocks = self.pyqgis_executor.extract_code_blocks(raw)
+                        if blocks and idx < len(blocks):
+                            code = blocks[idx]
+                    except Exception:
+                        code = None
+                    if not code:
+                        QMessageBox.information(self, 'Run Code', 'No code block found for this action.')
+                        return
+                    if action == 'run':
+                        self.add_to_execution_results('=' * 50)
+                        self.add_to_execution_results(f'Executing code block #{idx+1} from AI response (message {mid})...')
+                        self.add_to_execution_results('=' * 50)
+                        self.pyqgis_executor.execute_code(code)
+                    elif action == 'open':
+                        self.ensure_code_editor_dock(code)
+                    elif action == 'copy':
+                        try:
+                            QGuiApplication.clipboard().setText(code)
+                            QMessageBox.information(self, 'Copy Code', 'Code block copied to clipboard.')
+                        except Exception:
+                            pass
+                return
+        except Exception:
+            pass
+        # Fallback: open external links
         QDesktopServices.openUrl(url)
 
     def update_api_settings_ui(self):
@@ -1361,12 +1408,24 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         timestamp = datetime.now().strftime("%H:%M:%S")
         
         # Store in history
-        self.chat_history.append({
+        msg_id = (self.chat_history[-1]['id'] + 1) if self.chat_history else 1
+        entry = {
             "sender": sender,
             "message": message,
             "color": color,
-            "timestamp": timestamp
-        })
+            "timestamp": timestamp,
+            "id": msg_id,
+        }
+        self.chat_history.append(entry)
+        # Cache code blocks for AI messages for per-block actions
+        try:
+            if sender not in ("You", "System"):
+                if not hasattr(self, '_code_blocks_by_msg'):
+                    self._code_blocks_by_msg = {}
+                blocks = self.pyqgis_executor.extract_code_blocks(message)
+                self._code_blocks_by_msg[msg_id] = blocks or []
+        except Exception:
+            pass
         
         # Add to display
         self.render_message(sender, message, color, timestamp)
@@ -1413,7 +1472,15 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                 temp_doc.setMarkdown(message_md)
                 html_content = temp_doc.toHtml()
                 html_content = self.extract_body_content(html_content)
-                formatted_content = self.style_markdown_html(html_content)
+                # If this is an AI message, attach per-code-block actions
+                mid = None
+                try:
+                    # Lookup last inserted history id
+                    if len(self.chat_history) > 0:
+                        mid = self.chat_history[-1].get('id')
+                except Exception:
+                    mid = None
+                formatted_content = self.style_markdown_html(html_content, mid=mid)
             except Exception:
                 formatted_content = None
         if not formatted_content:
@@ -1582,7 +1649,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         except Exception:
             return text
 
-    def style_markdown_html(self, html_text: str) -> str:
+    def style_markdown_html(self, html_text: str, mid: int = None) -> str:
         """Lightweight inline styling for Qt Markdown HTML to improve readability.
 
         Ensures fenced code blocks render as black code boxes and improves spacing and
@@ -1673,6 +1740,9 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             )
 
             # Wrap each <pre> with a simple header bar to differentiate code visually
+            # Counter for code blocks in this message
+            code_idx = {'i': 0}
+
             def _wrap_pre(m):
                 pre_html = m.group(0)
                 # Ensure top corners are square so the header sits flush and remove outer margins
@@ -1682,11 +1752,30 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                     pre_html,
                     flags=re.IGNORECASE,
                 )
+                idx = code_idx['i']
+                code_idx['i'] += 1
+                # Build header with actions when a message id is provided
+                if mid is not None:
+                    run_href = f"copilot://run?mid={mid}&i={idx}"
+                    open_href = f"copilot://open?mid={mid}&i={idx}"
+                    copy_href = f"copilot://copy?mid={mid}&i={idx}"
+                    actions = (
+                        f'<span style="float:right; font-weight:normal;">'
+                        f'<a href="{run_href}" style="color:#8fd19e; text-decoration:none;">Run</a>'
+                        f' &nbsp;·&nbsp; '
+                        f'<a href="{open_href}" style="color:#9ec5fe; text-decoration:none;">Open in Editor</a>'
+                        f' &nbsp;·&nbsp; '
+                        f'<a href="{copy_href}" style="color:#ffda6a; text-decoration:none;">Copy</a>'
+                        f'</span>'
+                    )
+                else:
+                    actions = ''
                 header = (
                     '<div style="background-color:#000000; color:#FFFFFF; padding:6px 10px; '
                     'border:1px solid #000; border-bottom:none; border-top-left-radius:6px; '
                     'border-top-right-radius:6px; font-weight:bold; font-family:\'Segoe UI\', sans-serif; font-size:9pt;">'
                     'PyQGIS Code'
+                    f'{actions}'
                     '</div>'
                 )
                 return f'<div style="margin:10px 0;">{header}{pre_html}</div>'

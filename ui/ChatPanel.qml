@@ -368,9 +368,8 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 64
-        color: "#ffffff"
-        border.color: divider
-        border.width: 1
+        color: "transparent" // remove background strip
+        border.width: 0
 
         RowLayout {
             anchors.fill: parent
@@ -446,4 +445,6 @@ Rectangle {
             }
         }
     }
+
+    // Removed shadow so no box/strip appears behind composer
 }

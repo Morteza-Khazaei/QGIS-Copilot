@@ -127,12 +127,12 @@ Rectangle {
             // Gutter (avatar + name + time). Right for user, left otherwise.
             Column {
                 id: leftGutter
-                width: 92
+                width: 80
                 anchors.left: isUser ? undefined : parent.left
                 anchors.right: isUser ? parent.right : undefined
-                anchors.leftMargin: isUser ? 0 : 4
-                anchors.rightMargin: isUser ? 4 : 0
-                spacing: 4
+                anchors.leftMargin: isUser ? 0 : 2
+                anchors.rightMargin: isUser ? 2 : 0
+                spacing: 3
 
                 Rectangle {
                     id: avatarFrame
@@ -174,7 +174,7 @@ Rectangle {
                 anchors.left: isUser ? parent.left : leftGutter.right
                 anchors.right: isUser ? leftGutter.left : parent.right
                 anchors.top: parent.top
-                anchors.margins: 2
+                anchors.margins: 0
                 height: bubble.implicitHeight
 
                 Rectangle {
@@ -186,13 +186,13 @@ Rectangle {
 
                     // Position: user -> right, others -> left
                     anchors.top: parent.top
-                    anchors.margins: 2
+                    anchors.margins: 0
                     anchors.right: isUser ? parent.right : undefined
                     anchors.left: !isUser ? parent.left : undefined
 
                     // Width clamp
                     // Measure natural (unwrapped) text width, then clamp to rail
-                    property int maxW: Math.floor(parent.width * 0.66)
+                    property int maxW: Math.floor(parent.width * 0.82)
                     width: Math.min(measureText.implicitWidth + 24, maxW)
                     implicitHeight: contentCol.implicitHeight + 24
 
@@ -251,38 +251,43 @@ Rectangle {
 
                     Row {
                         id: actions
-                        spacing: 6
+                        spacing: 4
                         anchors.top: parent.top
                         anchors.right: parent.right
-                        anchors.margins: 6
-                        visible: hover.containsMouse
+                        anchors.margins: 4
+                        // Show only for assistant messages that contain fenced code, and only on hover
+                        visible: hover.containsMouse && isAssistant && isCode
 
                         Button {
                             id: copyBtn
                             text: "Copy"
-                            padding: 6
-                            font.pixelSize: 11
-                            visible: (isAssistant || isQgis)
+                            padding: 4
+                            font.pixelSize: 10
+                            implicitHeight: 22
+                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
                             onClicked: root.copyRequested(isCode && codeExtract.length ? codeExtract : messageText)
                         }
                         Button {
                             id: editBtn
                             text: "Edit"
-                            padding: 6
-                            font.pixelSize: 11
+                            padding: 4
+                            font.pixelSize: 10
+                            implicitHeight: 22
+                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
                             onClicked: root.editRequested(isCode && codeExtract.length ? codeExtract : messageText)
                         }
                         Button {
                             id: runBtn
                             text: "Run"
-                            padding: 6
-                            font.pixelSize: 11
-                            visible: isCode
+                            padding: 4
+                            font.pixelSize: 10
+                            implicitHeight: 22
+                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
                             onClicked: {
                                 if (isCode && codeExtract.length) root.runCodeRequested(codeExtract)
                                 else root.runRequested(messageText)
-            }
-        }
+                            }
+                        }
                     }
                 }
             }

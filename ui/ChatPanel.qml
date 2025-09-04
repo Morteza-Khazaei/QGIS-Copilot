@@ -85,23 +85,9 @@ Rectangle {
                 font.pixelSize: 18
                 font.bold: true
                 color: "#2a2a2a"
-                Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
-            }
-
-            Rectangle { Layout.fillWidth: true; color: "transparent" }
-
-            // Provider / Model
-            Row {
-                spacing: 8
-                Rectangle { width: 10; height: 10; radius: 5; color: "#36c" } // small accent
-                Label {
-                    text: (aiProviderName && aiProviderName.length ? aiProviderName : "AI") +
-                          (aiModelName && aiModelName.length ? (" • " + aiModelName) : "")
-                    color: faintText
-                    font.pixelSize: 12
-                    verticalAlignment: Text.AlignVCenter
-                    elide: Text.ElideRight
-                }
+                Layout.alignment: Qt.AlignVCenter
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
             }
         }
     }
@@ -340,13 +326,27 @@ Rectangle {
             anchors.margins: 10
             spacing: 8
 
-            TextField {
+            TextArea {
                 id: input
                 Layout.fillWidth: true
+                // Allow multi-line with scroll for long questions
                 placeholderText: "Type a message…"
                 Accessible.name: "Message input"
-                onAccepted: sendBtn.clicked()
+                wrapMode: TextEdit.Wrap
+                clip: true
                 hoverEnabled: true
+                ScrollBar.vertical: ScrollBar { }
+                // Send on Enter, newline on Shift+Enter
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            // allow newline
+                            return;
+                        }
+                        sendBtn.clicked();
+                        event.accepted = true;
+                    }
+                }
                 background: Rectangle {
                     radius: 18
                     color: input.hovered ? "#f8f9fb" : "#ffffff"
@@ -359,10 +359,12 @@ Rectangle {
 
             Button {
                 id: sendBtn
-                text: "Send"
+                text: ""
                 Accessible.name: "Send message"
                 enabled: (input.text || "").trim().length > 0
                 hoverEnabled: true
+                implicitWidth: 36
+                implicitHeight: 36
                 background: Rectangle {
                     radius: 18
                     color: !sendBtn.enabled ? "#b9d0f5"
@@ -374,9 +376,10 @@ Rectangle {
                     Behavior on color { ColorAnimation { duration: 100 } }
                 }
                 contentItem: Text {
-                    text: sendBtn.text
+                    // Paper-plane style arrow
+                    text: "➤"
                     color: "#ffffff"
-                    font.pixelSize: 14
+                    font.pixelSize: 16
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }

@@ -22,6 +22,7 @@ from .openai_api import OpenAIAPI
 from .claude_api import ClaudeAPI
 from .ollama_api import OllamaAPI
 from .pyqgis_executor import EnhancedPyQGISExecutor
+from .pyqgis_api_validator import PyQGISAPIValidator
 from . import web_kb
 
 
@@ -358,6 +359,16 @@ class CopilotChatDialog(QDialog):
         self.include_docs_cb = QCheckBox("Include PyQGIS Docs Summary in Context")
         self.include_docs_cb.setToolTip("Scrapes the PyQGIS Developer Cookbook and adds a brief, relevant summary to the AI context.")
         grid.addWidget(self.include_docs_cb, 4, 0, 1, 2)
+
+        # New: Strict pre-execution validation gate
+        self.strict_validation_cb = QCheckBox("Strict Pre-execution Validation (block on API errors)")
+        self.strict_validation_cb.setToolTip("Validates generated code against the live PyQGIS API before running. Blocks execution when errors are detected.")
+        grid.addWidget(self.strict_validation_cb, 5, 0, 1, 2)
+
+        # New: Include live API signatures in AI context
+        self.include_api_sigs_cb = QCheckBox("Include Live PyQGIS API Signatures in Context")
+        self.include_api_sigs_cb.setToolTip("Adds version-accurate method signatures for relevant classes to guide the AI and reduce guesswork.")
+        grid.addWidget(self.include_api_sigs_cb, 6, 0, 1, 2)
 
         prefs_layout.addLayout(grid)
         prefs_group.setLayout(prefs_layout)
@@ -997,6 +1008,24 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         except Exception:
             pass
 
+        # Enrich with live PyQGIS API signatures targeted to the task
+        try:
+            if self.include_api_sigs_cb.isChecked():
+                # Build once per session; reuse executor's environment for accuracy
+                validator = None
+                try:
+                    validator = getattr(self.pyqgis_executor, 'validator', None)
+                except Exception:
+                    validator = None
+                if validator is None:
+                    validator = PyQGISAPIValidator(self.pyqgis_executor.globals)
+                    validator.build_api_cache()
+                api_ctx = validator.generate_ai_context(message)
+                if api_ctx:
+                    context = (context + "\n\n" + api_ctx) if context else api_ctx
+        except Exception:
+            pass
+
         # Add docs summary if requested
         if self.include_docs_cb.isChecked():
             try:
@@ -1074,6 +1103,8 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.relaxed_safety_cb.setChecked(settings.value("qgis_copilot/prefs/relaxed_safety", False, type=bool))
         self.include_docs_cb.setChecked(settings.value("qgis_copilot/prefs/include_docs", True, type=bool))
         self.open_on_startup_cb.setChecked(settings.value("qgis_copilot/prefs/open_on_startup", True, type=bool))
+        self.strict_validation_cb.setChecked(settings.value("qgis_copilot/prefs/strict_validation", False, type=bool))
+        self.include_api_sigs_cb.setChecked(settings.value("qgis_copilot/prefs/include_api_signatures", True, type=bool))
         self.auto_feedback_enabled = self.auto_feedback_cb.isChecked()
 
         # Persist on change
@@ -1085,6 +1116,8 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.relaxed_safety_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/relaxed_safety", v))
         self.include_docs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_docs", v))
         self.open_on_startup_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/open_on_startup", v))
+        self.strict_validation_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/strict_validation", v))
+        self.include_api_sigs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_api_signatures", v))
 
     def load_workspace_dir(self):
         """Load the workspace directory from settings into the UI."""
@@ -1529,7 +1562,8 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                     return f"\nCOPILOT_CODE_BLOCK_{idx}__TOKEN__\n"
 
                 import re as _re
-                fenced_with_tokens = _re.sub(r"```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```", _sub_fence, fenced_md)
+                # Permissive fence matcher: supports ``` or ~~~, optional language, optional trailing newline
+                fenced_with_tokens = _re.sub(r"(?:```|~~~)(?:[a-zA-Z0-9_-]+)?[ \t]*\r?\n([\s\S]*?)\r?\n?(?:```|~~~)", _sub_fence, fenced_md)
 
                 # Render Markdown normally
                 temp_doc = QTextDocument()
@@ -1688,9 +1722,13 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         try:
             if not isinstance(text, str) or not text:
                 return text
-            # If already contains any fenced blocks, leave as-is
+            # If it appears to contain well-formed fenced blocks, leave as-is.
+            # Otherwise, continue and try to auto-fence.
             if '```' in text or '~~~' in text:
-                return text
+                import re as _re2
+                m = _re2.search(r"(?:```|~~~)(?:[a-zA-Z0-9_-]+)?[ \t]*\r?\n([\s\S]*?)\r?\n?(?:```|~~~)", text)
+                if m:
+                    return text
 
             import re
             lines = text.splitlines()

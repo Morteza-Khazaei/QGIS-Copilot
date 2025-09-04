@@ -10,6 +10,7 @@ import shutil
 import sys
 import traceback
 import time
+import inspect
 from io import StringIO
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
@@ -25,6 +26,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant, QSettings
+from .pyqgis_api_validator import PyQGISAPIValidator
 
 
 class ExecutionLog:
@@ -82,6 +84,12 @@ class EnhancedPyQGISExecutor(QObject):
         # Sticky task file path for iterative improvements until reset
         self._current_task_file = None
         self.setup_execution_environment()
+        # Build validator using the execution globals
+        try:
+            self.validator = PyQGISAPIValidator(self.globals)
+            self.validator.build_api_cache()
+        except Exception:
+            self.validator = None
     
     def setup_execution_environment(self):
         """Setup the execution environment with QGIS objects"""
@@ -151,8 +159,9 @@ class EnhancedPyQGISExecutor(QObject):
     
     def extract_code_blocks(self, text):
         """Extract Python code blocks from QGIS Copilot response"""
-        # Look for code blocks marked with ```python or ```
-        python_code_pattern = r'```(?:python)?\s*\n(.*?)\n```'
+        # Look for code blocks marked with ```python/```/~~~ with permissive newlines
+        fence = r"```|~~~"
+        python_code_pattern = rf'(?:{fence})(?:python|py)?[ \t]*\r?\n([\s\S]*?)\r?\n?(?:{fence})'
         code_blocks = re.findall(python_code_pattern, text, re.DOTALL)
         
         if not code_blocks:
@@ -222,12 +231,36 @@ class EnhancedPyQGISExecutor(QObject):
         # Pre-process QGIS imports consistently
         code = self._clean_qgis_imports(code)
 
-        # Run static validation against loaded PyQGIS API and emit findings
+        # Run API validation and optionally gate execution (Strict Mode)
         try:
-            issues = self._static_validate_code(code)
-            if issues:
-                out = "Static validation results:\n" + "\n".join(issues)
-                self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
+            if self.validator:
+                res = self.validator.validate_code_comprehensively(code)
+                strict = QSettings().value("qgis_copilot/prefs/strict_validation", False, type=bool)
+                msgs = []
+                if not res.get('syntax_valid', True):
+                    for m in res.get('syntax_errors', []):
+                        msgs.append(f"Syntax: {m}")
+                for e in res.get('attribute_errors', []):
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — try: {', '.join(sugg)}" if sugg else ""
+                    msgs.append(f"Attribute: {base}{hint}")
+                for e in res.get('method_errors', []):
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — suggestions: {', '.join(sugg)}" if sugg else ""
+                    msgs.append(f"Method: {base}{hint}")
+                for w in res.get('warnings', []):
+                    msgs.append(f"Warning: {w}")
+                if msgs:
+                    out = "Pre-execution validation:\n" + "\n".join(msgs)
+                    self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
+                # If Strict Mode and there are real errors, block execution
+                if strict and (not res.get('syntax_valid', True) or res.get('attribute_errors') or res.get('method_errors')):
+                    msg = "Execution blocked by Strict Validation. Fix issues and retry."
+                    self.add_to_history(ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0))
+                    self.execution_completed.emit(msg, False, self.execution_history[-1])
+                    return
         except Exception:
             pass
 
@@ -419,7 +452,7 @@ class EnhancedPyQGISExecutor(QObject):
                         if hasattr(obj, '__mro__') or hasattr(obj, '__dict__') or hasattr(obj, '__spec__'):
                             if not hasattr(obj, attr):
                                 # Suggest closest match
-                                close = difflib.get_close_matches(attr, dir(obj), n=1)
+                                close = difflib.get_close_matches(attr, dir(obj), n=2)
                                 hint = f" Did you mean '{close[0]}'?" if close else ""
                                 findings.append(f"Error: '{base}.{attr}' does not exist.{hint}")
                     except Exception:
@@ -437,7 +470,122 @@ class EnhancedPyQGISExecutor(QObject):
                         if name.startswith('Qgs'):
                             findings.append(f"Warning: '{name}' not found in environment; ensure it is defined or imported correctly.")
 
+        # Simple type inference: x = QgsClass(...)
+        var_types = self._infer_simple_types(tree, env)
+
+        # Validate method calls and their signatures
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Instance method: var.method(...)
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                var_name = func.value.id
+                method_name = func.attr
+                cls = var_types.get(var_name)
+                if cls is not None:
+                    if not hasattr(cls, method_name):
+                        close = difflib.get_close_matches(method_name, dir(cls), n=2)
+                        hint = f" Did you mean '{close[0]}'?" if close else ""
+                        findings.append(f"Error: '{cls.__name__}.{method_name}' does not exist.{hint}")
+                        continue
+                    method_obj = getattr(cls, method_name)
+                    findings.extend(self._validate_call_signature(node, method_obj, bound_instance=True, owner_name=cls.__name__))
+            # Class/module attribute call: QgsProject.instance(...)
+            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                base = func.value.id
+                method_name = func.attr
+                if base in env:
+                    obj = env[base]
+                    if hasattr(obj, method_name):
+                        method_obj = getattr(obj, method_name)
+                        findings.extend(self._validate_call_signature(node, method_obj, bound_instance=False, owner_name=base))
+
         return findings
+
+    def _infer_simple_types(self, tree, env):
+        """Infer variable names assigned from known QGIS class constructors.
+
+        Returns dict: var_name -> class_object
+        """
+        var_types = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                if not targets:
+                    continue
+                callee = node.value.func
+                cls_obj = None
+                if isinstance(callee, ast.Name) and callee.id in env:
+                    cand = env.get(callee.id)
+                    try:
+                        if inspect.isclass(cand):
+                            cls_obj = cand
+                    except Exception:
+                        pass
+                elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
+                    base = callee.value.id
+                    if base in env:
+                        try:
+                            cand = getattr(env[base], callee.attr, None)
+                            if inspect.isclass(cand):
+                                cls_obj = cand
+                        except Exception:
+                            pass
+                if cls_obj is not None:
+                    for n in targets:
+                        var_types[n] = cls_obj
+        return var_types
+
+    def _validate_call_signature(self, call_node: ast.Call, method_obj, bound_instance: bool, owner_name: str):
+        """Validate ast.Call against an inspectable signature.
+
+        - bound_instance: True if method will be invoked on an instance (drop leading self)
+        Returns list of issue strings.
+        """
+        issues = []
+        try:
+            sig = inspect.signature(method_obj)
+        except Exception:
+            return issues
+
+        params = list(sig.parameters.values())
+        if bound_instance and params and params[0].kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            # Drop 'self' for instance-bound calls
+            params = params[1:]
+
+        # Required positional params without defaults
+        required_pos = [p for p in params
+                        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                        and p.default is inspect._empty]
+        provided_pos = len(call_node.args)
+
+        # Keyword-only params
+        required_kwonly = [p for p in params if p.kind == inspect.Parameter.KEYWORD_ONLY and p.default is inspect._empty]
+        provided_kw_names = {kw.arg for kw in call_node.keywords if kw.arg}
+
+        if provided_pos < len(required_pos):
+            issues.append(
+                f"Warning: '{owner_name}.{getattr(method_obj, '__name__', str(method_obj))}' expects at least {len(required_pos)} positional argument(s) (excluding self); got {provided_pos}."
+            )
+
+        valid_kw_names = {p.name for p in params if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
+        unknown = provided_kw_names - valid_kw_names
+        for bad in unknown:
+            close = difflib.get_close_matches(bad, list(valid_kw_names), n=1)
+            hint = f" Did you mean '{close[0]}'?" if close else ""
+            issues.append(f"Warning: unknown keyword '{bad}' for '{owner_name}.{getattr(method_obj, '__name__', str(method_obj))}'.{hint}")
+
+        missing_kwonly = [p.name for p in required_kwonly if p.name not in provided_kw_names]
+        if missing_kwonly:
+            issues.append(
+                f"Warning: missing required keyword-only argument(s) {missing_kwonly} for '{owner_name}.{getattr(method_obj, '__name__', str(method_obj))}'."
+            )
+
+        return issues
     
     def get_execution_context_for_ai(self, last_n_executions=3):
         """Get execution context to send back to AI for improvements"""
@@ -647,6 +795,37 @@ class EnhancedPyQGISExecutor(QObject):
             self.add_to_history(execution_log)
             self.execution_completed.emit(err, False, execution_log)
             return
+
+        # Pre-validate and optionally gate execution
+        try:
+            if self.validator:
+                res = self.validator.validate_code_comprehensively(original_code)
+                strict = QSettings().value("qgis_copilot/prefs/strict_validation", False, type=bool)
+                msgs = []
+                if not res.get('syntax_valid', True):
+                    for m in res.get('syntax_errors', []):
+                        msgs.append(f"Syntax: {m}")
+                for e in res.get('attribute_errors', []):
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — try: {', '.join(sugg)}" if sugg else ""
+                    msgs.append(f"Attribute: {base}{hint}")
+                for e in res.get('method_errors', []):
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — suggestions: {', '.join(sugg)}" if sugg else ""
+                    msgs.append(f"Method: {base}{hint}")
+                for w in res.get('warnings', []):
+                    msgs.append(f"Warning: {w}")
+                if msgs:
+                    self.add_to_history(ExecutionLog(code="", success=True, output="Pre-execution validation:\n"+"\n".join(msgs), execution_time=0))
+                if strict and (not res.get('syntax_valid', True) or res.get('attribute_errors') or res.get('method_errors')):
+                    msg = f"Execution blocked by Strict Validation for file: {file_path}"
+                    self.add_to_history(ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0))
+                    self.execution_completed.emit(msg, False, self.execution_history[-1])
+                    return
+        except Exception:
+            pass
 
         # Best-effort: Open the script in the QGIS Python Console editor
         try:
@@ -981,14 +1160,49 @@ class EnhancedPyQGISExecutor(QObject):
         """Analyze failed execution and suggest improvements to AI"""
         if not failed_execution_log or failed_execution_log.success:
             return
-        
-        # Create improvement suggestion based on error pattern
-        suggestion = "The previous code execution failed. Please analyze the error and provide a complete, corrected, and executable script.\n\n"
-        suggestion += f"Failed Code:\n```python\n{failed_execution_log.code}\n```\n\n"
-        suggestion += f"Error Details:\n```\n{failed_execution_log.error_msg}\n```\n\n"
-        suggestion += "Your task is to provide a new version of the script that fixes the error. Do not just explain the problem."
-        
-        self.improvement_suggested.emit(failed_execution_log.code, suggestion)
+        # Create improvement suggestion with API context when available
+        error_msg = failed_execution_log.error_msg or ""
+        code = failed_execution_log.code or ""
+
+        api_help = ""
+        try:
+            if self.validator:
+                # Heuristic: extract Class and attribute from common error patterns
+                import re as _re
+                m = _re.search(r"'(?P<class>Qgs\w+)' object has no attribute '(?P<attr>\w+)'", error_msg)
+                if not m:
+                    m = _re.search(r"(?P<class>Qgs\w+)\.(?P<attr>\w+)\(\) does not exist", error_msg)
+                if m:
+                    cls = m.group('class')
+                    attr = m.group('attr')
+                    # Build API cache if needed
+                    self.validator.build_api_cache()
+                    info = self.validator.api_cache.get(cls)
+                    if info:
+                        methods = info.get('methods', {})
+                        # If exact method exists, include its signature; else show close suggestions
+                        if attr in methods and methods[attr].get('signature') is not None:
+                            sig = methods[attr]['signature']
+                            doc = methods[attr].get('docstring') or ''
+                            first = doc.split('\n')[0] if doc else ''
+                            api_help = f"CORRECT API USAGE:\n{cls}.{attr}{sig}\n"
+                            if first:
+                                api_help += f"\nNote: {first}\n"
+                        else:
+                            close = difflib.get_close_matches(attr, methods.keys(), n=3, cutoff=0.6)
+                            if close:
+                                api_help = "Method not found. Did you mean:\n  - " + "\n  - ".join(close) + "\n"
+        except Exception:
+            pass
+
+        suggestion = "SPECIFIC FIX NEEDED:\n\n"
+        if api_help:
+            suggestion += api_help + "\n"
+        suggestion += f"Error Details:\n```\n{error_msg}\n```\n\n"
+        suggestion += f"FAILED CODE:\n```python\n{code}\n```\n\n"
+        suggestion += "TASK: Provide corrected code using the correct PyQGIS API methods and signatures. Return a complete, runnable script."
+
+        self.improvement_suggested.emit(code, suggestion)
     
     def get_available_functions(self):
         """Get list of available QGIS functions for context"""

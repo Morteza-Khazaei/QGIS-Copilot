@@ -1,6 +1,6 @@
 import os
 from qgis.PyQt import QtCore, QtWidgets
-from qgis.PyQt.QtCore import QObject, QUrl, pyqtSlot
+from qgis.PyQt.QtCore import QObject, QUrl, pyqtSlot, QSettings, Qt
 from qgis.PyQt.QtGui import QGuiApplication
 from qgis.PyQt.QtWidgets import QDockWidget, QWidget, QMessageBox
 
@@ -57,6 +57,14 @@ class QMLChatDock(QObject):
                 return
             main = self.iface.mainWindow()
             dock = QDockWidget("QGIS Copilot (QML)", main)
+            dock.setObjectName("QMLCopilotDock")
+            # Allow floating/moving/closing; we'll persist state ourselves
+            dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+            dock.setFeatures(
+                QtWidgets.QDockWidget.DockWidgetMovable
+                | QtWidgets.QDockWidget.DockWidgetFloatable
+                | QtWidgets.QDockWidget.DockWidgetClosable
+            )
             backend = self._detect_qml_backend()
 
             widget = None
@@ -137,7 +145,14 @@ class QMLChatDock(QObject):
                 widget.setToolTip('Qt Quick is not available; using basic chat UI.')
 
             dock.setWidget(widget)
-            main.addDockWidget(0x2, dock)  # Qt.RightDockWidgetArea
+
+            # Restore last dock area (default: Right)
+            try:
+                s = QSettings()
+                saved_area = int(s.value("qgis_copilot/qml_dock_area", int(Qt.RightDockWidgetArea)))
+            except Exception:
+                saved_area = int(Qt.RightDockWidgetArea)
+            main.addDockWidget(saved_area, dock)
 
             # Connect QML signals if we have a root object
             if root is not None:
@@ -167,10 +182,84 @@ class QMLChatDock(QObject):
                 except Exception:
                     pass
 
+            # Default/persisted geometry: preset size and remember float pos/size
+            try:
+                s = QSettings()
+                # Preset size when no prior value
+                def_w = int(s.value("qgis_copilot/qml_dock_width", 920))
+                def_h = int(s.value("qgis_copilot/qml_dock_height", 640))
+                was_float = s.value("qgis_copilot/qml_dock_floating", False, type=bool)
+                px = int(s.value("qgis_copilot/qml_dock_pos_x", -1))
+                py = int(s.value("qgis_copilot/qml_dock_pos_y", -1))
+                # Apply floating state and geometry if previously floating
+                dock.resize(def_w, def_h)
+                if was_float:
+                    dock.setFloating(True)
+                    if px >= 0 and py >= 0:
+                        dock.move(px, py)
+            except Exception:
+                pass
+
+            # Track changes to persist area/geometry
+            try:
+                dock.topLevelChanged.connect(lambda floating: self._on_top_level_changed(dock, floating))
+            except Exception:
+                pass
+            try:
+                dock.dockLocationChanged.connect(lambda area: self._on_dock_location_changed(dock, area))
+            except Exception:
+                # Some Qt builds don't expose this; fall back to mainwindow query when toggling floating
+                pass
+            dock.installEventFilter(self)
+
             # Keep refs
             self._dock = dock
             self._view = widget
             self._root = root
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self._dock and self._dock and self._dock.isFloating():
+                if event.type() in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
+                    self._save_floating_geometry()
+        except Exception:
+            pass
+        return super().eventFilter(obj, event) if hasattr(super(), 'eventFilter') else False
+
+    def _on_top_level_changed(self, dock, floating: bool):
+        try:
+            s = QSettings()
+            s.setValue("qgis_copilot/qml_dock_floating", bool(floating))
+            if floating:
+                self._save_floating_geometry()
+            else:
+                # Save current dock area when re-docked
+                main = self.iface.mainWindow()
+                area = main.dockWidgetArea(dock)
+                s.setValue("qgis_copilot/qml_dock_area", int(area))
+        except Exception:
+            pass
+
+    def _on_dock_location_changed(self, dock, area):
+        try:
+            QSettings().setValue("qgis_copilot/qml_dock_area", int(area))
+        except Exception:
+            pass
+
+    def _save_floating_geometry(self):
+        try:
+            if not self._dock:
+                return
+            if not self._dock.isFloating():
+                return
+            g = self._dock.frameGeometry()
+            s = QSettings()
+            s.setValue("qgis_copilot/qml_dock_pos_x", g.x())
+            s.setValue("qgis_copilot/qml_dock_pos_y", g.y())
+            s.setValue("qgis_copilot/qml_dock_width", g.width())
+            s.setValue("qgis_copilot/qml_dock_height", g.height())
         except Exception:
             pass
 

@@ -16,11 +16,37 @@ try:
     import requests
 except Exception:
     requests = None
-from qgis.core import QgsMessageLog, Qgis
+from qgis.core import QgsMessageLog, Qgis, QgsApplication
 
 
-BASE_URL = "https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/index.html"
-CACHE_FILE = "pyqgis_cookbook_cache.json"
+# Build docs base URL dynamically from the running QGIS version
+def _doc_version() -> str:
+    """Return 'major.minor' (e.g., '3.40') from the running QGIS version.
+
+    Falls back to '3.40' if parsing fails.
+    """
+    try:
+        ver = QgsApplication.qgisVersion() or getattr(Qgis, 'QGIS_VERSION', '')
+        # Expect patterns like '3.40.7-Bratislava' or '3.28.10-Firenze'
+        import re as _re
+        m = _re.search(r"(\d+)\.(\d+)", ver or '')
+        if m:
+            return f"{int(m.group(1))}.{int(m.group(2))}"
+    except Exception:
+        pass
+    return "3.40"
+
+def _docs_root() -> str:
+    return f"https://docs.qgis.org/{_doc_version()}/en/docs/pyqgis_developer_cookbook/"
+
+def _index_url() -> str:
+    return _docs_root() + "index.html"
+
+# Cache per API version to avoid mixing across QGIS versions
+def _cache_filename() -> str:
+    return f"pyqgis_cookbook_cache_{_doc_version().replace('.', '_')}.json"
+
+CACHE_FILE = _cache_filename()
 CACHE_TTL_DAYS = 7
 
 
@@ -45,7 +71,7 @@ def _is_cache_fresh(path):
 def _absolute_url(href):
     if href.startswith("http://") or href.startswith("https://"):
         return href
-    base = "https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/"
+    base = _docs_root()
     if href.startswith("../"):
         href = href.replace("../", "")
     return base + href
@@ -88,12 +114,13 @@ def fetch_and_cache(max_link_pages=8):
         QgsMessageLog.logMessage("Requests module not available; skipping docs fetch.", "QGIS Copilot", level=Qgis.Warning)
         return False
     try:
-        resp = requests.get(BASE_URL, timeout=(5, 15))
+        index = _index_url()
+        resp = requests.get(index, timeout=(5, 15))
         resp.raise_for_status()
         html = resp.text
-        data = {"source": BASE_URL, "fetched_at": time.time(), "pages": []}
-        sections = _extract_sections(html, BASE_URL)
-        data["pages"].append({"url": BASE_URL, "sections": sections})
+        data = {"source": index, "fetched_at": time.time(), "pages": []}
+        sections = _extract_sections(html, index)
+        data["pages"].append({"url": index, "sections": sections})
 
         # Collect a few internal links from the index
         links = re.findall(r"href=\"([^\"]+)\"", html)
@@ -106,7 +133,7 @@ def fetch_and_cache(max_link_pages=8):
             if "pyqgis_developer_cookbook" not in href:
                 continue
             url = _absolute_url(href)
-            if url in picked or url == BASE_URL:
+            if url in picked or url == index:
                 continue
             picked.append(url)
             if len(picked) >= max_link_pages:

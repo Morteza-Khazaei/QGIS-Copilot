@@ -4,6 +4,8 @@ and feedback loop for AI improvements
 """
 
 import re
+import ast
+import difflib
 import shutil
 import sys
 import traceback
@@ -217,31 +219,17 @@ class EnhancedPyQGISExecutor(QObject):
     def execute_code(self, code):
         """Execute PyQGIS code safely with detailed logging"""
         original_code = code
-        # Pre-process code to remove redundant/incorrect QGIS imports that the AI might add.
-        # The execution environment provides all necessary QGIS modules and classes globally,
-        # so these imports are unnecessary and can sometimes be incorrect (e.g., from qgis.core import QVariant).
-        lines = code.split('\n')
-        cleaned_lines = []
-        in_qgis_import_block = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith('from qgis.') and 'import' in stripped:
-                if stripped.endswith('('):
-                    in_qgis_import_block = True
-                # This is a qgis import line, skip it
-                continue
-            
-            if in_qgis_import_block:
-                if ')' in stripped:
-                    in_qgis_import_block = False
-                # This is inside a qgis import block, skip it
-                continue
+        # Pre-process QGIS imports consistently
+        code = self._clean_qgis_imports(code)
 
-            if stripped == 'import qgis':
-                continue
-            
-            cleaned_lines.append(line)
-        code = '\n'.join(cleaned_lines)
+        # Run static validation against loaded PyQGIS API and emit findings
+        try:
+            issues = self._static_validate_code(code)
+            if issues:
+                out = "Static validation results:\n" + "\n".join(issues)
+                self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
+        except Exception:
+            pass
 
         start_time = time.time()
         
@@ -361,6 +349,95 @@ class EnhancedPyQGISExecutor(QObject):
             parts.append(f"ERROR:\n{log.error_msg}")
         parts.append("-" * 50)
         return "\n".join(parts) + "\n"
+
+    def _clean_qgis_imports(self, code: str) -> str:
+        """Remove redundant/incorrect qgis imports; env already provides QGIS classes.
+
+        - Drops any 'from qgis.* import ...' lines (including parenthesized blocks)
+        - Drops plain 'import qgis' lines
+        """
+        lines = code.split('\n')
+        cleaned_lines = []
+        in_qgis_import_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('from qgis.') and 'import' in stripped:
+                if stripped.endswith('('):
+                    in_qgis_import_block = True
+                # Skip this import line
+                continue
+            if in_qgis_import_block:
+                if ')' in stripped:
+                    in_qgis_import_block = False
+                # Skip lines inside import block
+                continue
+            if stripped == 'import qgis':
+                continue
+            cleaned_lines.append(line)
+        return '\n'.join(cleaned_lines)
+
+    def _static_validate_code(self, code: str):
+        """Lightweight static checks using live PyQGIS API via introspection.
+
+        - Verifies attribute accesses like 'QgsFoo.Bar' against actual objects in self.globals
+        - Flags obvious invalid imports still present
+        - Notes unknown top-level names which are not provided by env/builtins
+        Returns list of strings with findings.
+        """
+        findings = []
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            findings.append(f"Syntax error at L{e.lineno}: {e.msg}")
+            return findings
+
+        env = dict(self.globals)
+        # Collect builtins for name resolution
+        builtin_names = set(dir(__builtins__)) if isinstance(__builtins__, dict) else set(dir(__builtins__))
+
+        # Check imports of qgis.* still present
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split('.')[0] == 'qgis':
+                        findings.append(f"Warning: redundant import '{alias.name}' will be ignored; QGIS objects are preloaded.")
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ''
+                if mod.startswith('qgis.'):
+                    names = ', '.join(a.name for a in node.names)
+                    findings.append(f"Warning: redundant import from '{mod}' ({names}) will be ignored; use preloaded classes.")
+
+        # Attribute checks like 'QgsLayoutItemMap.attemptSetSize'
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                base = node.value.id
+                attr = node.attr
+                if base in env:
+                    obj = env.get(base)
+                    # Only check attributes on modules/classes, avoid instance-unknowns
+                    try:
+                        if hasattr(obj, '__mro__') or hasattr(obj, '__dict__') or hasattr(obj, '__spec__'):
+                            if not hasattr(obj, attr):
+                                # Suggest closest match
+                                close = difflib.get_close_matches(attr, dir(obj), n=1)
+                                hint = f" Did you mean '{close[0]}'?" if close else ""
+                                findings.append(f"Error: '{base}.{attr}' does not exist.{hint}")
+                    except Exception:
+                        pass
+
+        # Unknown top-level names used in Call contexts
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name):
+                    name = func.id
+                    if name not in env and name not in builtin_names:
+                        # Might be user-defined earlier in script; try to see if it's assigned before.
+                        # Heuristic: only warn when name starts with 'Qgs' (likely API) or looks like module/class.
+                        if name.startswith('Qgs'):
+                            findings.append(f"Warning: '{name}' not found in environment; ensure it is defined or imported correctly.")
+
+        return findings
     
     def get_execution_context_for_ai(self, last_n_executions=3):
         """Get execution context to send back to AI for improvements"""
@@ -507,26 +584,50 @@ class EnhancedPyQGISExecutor(QObject):
         shutil.copyfile(self._current_task_file, dest)
         return dest
 
-    def save_response_to_task_file(self, response_text: str, filename_hint: str = None) -> str:
+    def save_response_to_task_file(self, response_text: str, filename_hint: str = None, quiet: bool = False) -> str:
         """Merge response code blocks and save to the sticky task file.
 
-        Returns the saved file path. Raises on failure.
+        - Returns the saved file path. Raises on failure if no code found.
+        - If `quiet` is True, suppresses save logs and "up-to-date" notices.
+        - Writes only when content changed to avoid unnecessary saves.
         """
         code_blocks = self.extract_code_blocks(response_text)
         if not code_blocks:
             raise ValueError("No executable code found in the response.")
         fpath = self._ensure_task_file(filename_hint)
         merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
-        with open(fpath, 'w', encoding='utf-8') as fh:
-            fh.write(merged)
-        # Log save event
-        saved_log = ExecutionLog(
-            code=f"# File saved: {fpath}",
-            success=True,
-            output=f"Saved task script to: {fpath}",
-            execution_time=0,
-        )
-        self.add_to_history(saved_log)
+
+        # Only write if file is missing or content changed
+        need_write = True
+        try:
+            if os.path.exists(fpath):
+                with open(fpath, 'r', encoding='utf-8') as fh:
+                    existing = fh.read()
+                need_write = (existing != merged)
+        except Exception:
+            need_write = True
+
+        if need_write:
+            with open(fpath, 'w', encoding='utf-8') as fh:
+                fh.write(merged)
+            if not quiet:
+                saved_log = ExecutionLog(
+                    code=f"# File saved: {fpath}",
+                    success=True,
+                    output=f"Saved task script to: {fpath}",
+                    execution_time=0,
+                )
+                self.add_to_history(saved_log)
+        else:
+            if not quiet:
+                info_log = ExecutionLog(
+                    code=f"# File up-to-date: {fpath}",
+                    success=True,
+                    output=f"Task script already up-to-date: {fpath}",
+                    execution_time=0,
+                )
+                self.add_to_history(info_log)
+
         return fpath
 
     def execute_task_file(self, file_path: str):
@@ -619,6 +720,7 @@ class EnhancedPyQGISExecutor(QObject):
         try:
             fpath = self._ensure_task_file(filename_hint)
             merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
+            merged = self._clean_qgis_imports(merged)
             with open(fpath, 'w', encoding='utf-8') as fh:
                 fh.write(merged)
             # Log save event
@@ -629,6 +731,14 @@ class EnhancedPyQGISExecutor(QObject):
                 execution_time=0,
             )
             self.add_to_history(saved_log)
+            # Static validation summary
+            try:
+                issues = self._static_validate_code(merged)
+                if issues:
+                    out = "Static validation results:\n" + "\n".join(issues)
+                    self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -671,7 +781,7 @@ class EnhancedPyQGISExecutor(QObject):
         # Light cleanup to avoid common pitfalls
         # - Remove incorrect iface import (iface is provided by QGIS and injected)
         merged = re.sub(r"^\s*from\s+qgis\.gui\s+import\s+iface\s*$", "", merged, flags=re.MULTILINE)
-        merged_code = merged
+        merged_code = self._clean_qgis_imports(merged)
 
         # Write to a stable file path in the workspace
         try:
@@ -690,6 +800,15 @@ class EnhancedPyQGISExecutor(QObject):
             with open(fpath, 'w', encoding='utf-8') as fh:
                 fh.write(compat_header)
                 fh.write(merged_code)
+
+            # Run static validation and emit findings before execution
+            try:
+                issues = self._static_validate_code(merged_code)
+                if issues:
+                    out = "Static validation results:\n" + "\n".join(issues)
+                    self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
+            except Exception:
+                pass
 
             # Try to open the Python console and load the script in the editor (best-effort)
             try:

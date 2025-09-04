@@ -414,30 +414,37 @@ class CopilotChatDialog(QDialog):
         self.api_group.setLayout(api_layout)
         layout.addWidget(self.api_group)
 
-        # Ollama-specific configuration (shown only when provider is Ollama)
-        self.ollama_group = QGroupBox("Ollama Configuration")
-        ollama_layout = QVBoxLayout()
-        ollama_layout.addWidget(QLabel("Base URL (daemon):"))
+        # Ollama-specific configuration (inline in API Configuration; no extra group box)
+        self.ollama_section_widget = QWidget()
+        _ollama_wrap = QVBoxLayout(self.ollama_section_widget)
+        _ollama_wrap.setContentsMargins(0, 0, 0, 0)
+        _ollama_wrap.setSpacing(6)
+
+        self.ollama_base_url_label = QLabel("Base URL (daemon):")
+        _ollama_wrap.addWidget(self.ollama_base_url_label)
+
         self.ollama_base_url_input = QLineEdit()
         self.ollama_base_url_input.setPlaceholderText("http://localhost:11434")
         self.ollama_base_url_input.setText(self.ollama_api.get_base_url())
-        ollama_layout.addWidget(self.ollama_base_url_input)
+        _ollama_wrap.addWidget(self.ollama_base_url_input)
 
-        ollama_btn_row = QHBoxLayout()
+        _ollama_btn_row_w = QWidget()
+        _ollama_btn_row = QHBoxLayout(_ollama_btn_row_w)
+        _ollama_btn_row.setContentsMargins(0, 0, 0, 0)
+        _ollama_btn_row.setSpacing(6)
         self.ollama_save_url_btn = QPushButton("Save Base URL")
         self.ollama_save_url_btn.clicked.connect(self.on_save_ollama_base_url)
         self.ollama_check_btn = QPushButton("Check Connection")
         self.ollama_check_btn.clicked.connect(self.on_check_ollama_connection)
         self.ollama_refresh_models_btn = QPushButton("Refresh Models")
         self.ollama_refresh_models_btn.clicked.connect(self.on_refresh_ollama_models)
-        ollama_btn_row.addWidget(self.ollama_save_url_btn)
-        ollama_btn_row.addWidget(self.ollama_check_btn)
-        ollama_btn_row.addWidget(self.ollama_refresh_models_btn)
-        ollama_btn_row.addStretch()
-        ollama_layout.addLayout(ollama_btn_row)
+        _ollama_btn_row.addWidget(self.ollama_save_url_btn)
+        _ollama_btn_row.addWidget(self.ollama_check_btn)
+        _ollama_btn_row.addWidget(self.ollama_refresh_models_btn)
+        _ollama_btn_row.addStretch()
+        _ollama_wrap.addWidget(_ollama_btn_row_w)
 
-        self.ollama_group.setLayout(ollama_layout)
-        layout.addWidget(self.ollama_group)
+        api_layout.addWidget(self.ollama_section_widget)
 
         # Model settings
         model_group = QGroupBox("Model Settings")
@@ -608,14 +615,47 @@ class CopilotChatDialog(QDialog):
                         QMessageBox.information(self, 'Run Code', 'No code block found for this action.')
                         return
                     if action == 'run':
-                        self.add_to_execution_results('=' * 50)
-                        self.add_to_execution_results(f'Executing code block #{idx+1} from AI response (message {mid})...')
-                        self.add_to_execution_results('=' * 50)
-                        self.pyqgis_executor.execute_code(code)
-                    elif action == 'open':
-                        # Prefer opening the saved script produced when the AI replied
+                        # Save the script to the workspace (sticky task file) before executing
                         try:
-                            path = getattr(self, '_last_saved_task_path', None)
+                            # Derive filename hint from last user message
+                            filename_hint = None
+                            for item in reversed(self.chat_history):
+                                if item.get('sender') == 'You':
+                                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                                    break
+                            # Wrap single block as a fenced response for saving convenience
+                            fenced = f"```python\n{code}\n```"
+                            saved_path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=filename_hint, quiet=True)
+                            self._last_saved_task_path = saved_path
+                        except Exception:
+                            saved_path = None
+
+                        header_msg = (
+                            "=" * 50 + "\n"
+                            + f"Executing code block #{idx+1} from AI response (message {mid})..." + "\n"
+                            + "=" * 50
+                        )
+                        self.add_to_execution_results(header_msg)
+                        # Execute according to preference; always saved beforehand
+                        try:
+                            if self.run_in_console_cb.isChecked() and saved_path:
+                                self.pyqgis_executor.execute_task_file(saved_path)
+                            else:
+                                self.pyqgis_executor.execute_code(code)
+                        except Exception:
+                            # Fallback to in-memory execution if file execution fails
+                            self.pyqgis_executor.execute_code(code)
+                    elif action == 'open':
+                        # Save the script to the workspace, then open in the QGIS Python Console editor
+                        try:
+                            filename_hint = None
+                            for item in reversed(self.chat_history):
+                                if item.get('sender') == 'You':
+                                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                                    break
+                            fenced = f"```python\n{code}\n```"
+                            path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=filename_hint, quiet=True)
+                            self._last_saved_task_path = path
                             if path and os.path.exists(path):
                                 self._open_file_in_python_console_editor(path)
                                 return
@@ -705,8 +745,11 @@ class CopilotChatDialog(QDialog):
         self.api_key_input.setVisible(not is_local)
         self.save_key_button.setVisible(not is_local)
         self.test_key_button.setVisible(not is_local)
-        # Ollama config group visibility
-        self.ollama_group.setVisible(is_local)
+        # Ollama inline controls visibility
+        try:
+            self.ollama_section_widget.setVisible(is_local)
+        except Exception:
+            pass
 
         # Disconnect signal to prevent premature firing while we update the UI
         self.model_selection_combo.blockSignals(True)
@@ -771,7 +814,6 @@ To use Claude, you need an Anthropic API key:<br>
 <b>Using Ollama (Local)</b><br><br>
 Ollama runs models locally — no API key required. Install and start Ollama, then pull a model:<br>
 <code>ollama run gpt-oss:20b</code><br><br>
-Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>. You can change the model from the list above.
             """)
 
     # Ollama UI actions
@@ -967,11 +1009,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             except Exception:
                 pass
 
-        # Log provider and key config details before sending
-        try:
-            self.log_provider_and_config()
-        except Exception:
-            pass
+        # Skip verbose provider/config snapshot for submitted tasks
 
         # For Ollama, don't show a blocking progress bar; others keep it
         if self.current_api_name != "Ollama (Local)":
@@ -1236,21 +1274,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         self.last_response = response
         # Standalone Run button removed; per-code-block Run is available in the response
         
-        # Save the response code to a sticky workspace script so Execute Last Code can run it
-        try:
-            # Derive filename hint from last user message
-            filename_hint = None
-            for item in reversed(self.chat_history):
-                if item.get('sender') == 'You':
-                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
-                    break
-            saved_path = self.pyqgis_executor.save_response_to_task_file(response, filename_hint=filename_hint)
-            self._last_saved_task_path = saved_path
-            # Brief notice in logs panel
-            self.add_to_execution_results(f"Saved response script: {saved_path}")
-        except Exception:
-            # Ignore if no code found; user can still execute normally
-            pass
+        # Do not auto-save the script on response; save only on Run/Open actions
         
         # Do not mirror API responses to the Live Logs panel
 
@@ -1354,37 +1378,34 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
     
     def execute_code_from_response(self, response):
         """Execute code blocks found in the response"""
+        # Auto-execute should not persist files; run in-memory.
         self.add_to_execution_results("=" * 50)
         self.add_to_execution_results("Executing code from QGIS Copilot response...")
         self.add_to_execution_results("=" * 50)
-        
-        # Derive a filename hint from the last user message (task name)
-        filename_hint = None
+
         try:
-            for item in reversed(self.chat_history):
-                if item.get('sender') == 'You':
-                    # Use up to 80 chars of the user message as the filename hint
-                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
-                    break
+            blocks = self.pyqgis_executor.extract_code_blocks(response) or []
         except Exception:
-            filename_hint = None
-        
-        # Choose execution route
-        if self.run_in_console_cb.isChecked():
-            self.pyqgis_executor.execute_response_via_console(response, filename_hint=filename_hint)
-        else:
-            self.pyqgis_executor.execute_gemini_response(response, filename_hint=filename_hint)
+            blocks = []
+        if not blocks:
+            QMessageBox.information(self, 'Run Code', 'No code block found in the response to execute.')
+            return
+        for i, code in enumerate(blocks):
+            try:
+                if len(blocks) > 1:
+                    self.add_to_execution_results(f"Executing code block {i+1}/{len(blocks)}...")
+                self.pyqgis_executor.execute_code(code)
+            except Exception:
+                # Continue to next block
+                pass
 
     def handle_execution_completed(self, result_message, success, execution_log):
         """Handle the completion of a code execution."""
         # Notify in chat with a brief summary so the user sees outcomes inline
         summary_color = "#28a745" if success else "#dc3545"
         status_text = "succeeded" if success else "failed"
-        self.add_to_chat(
-            "System",
-            f"Code execution {status_text}. See Log Messages panel for details.",
-            summary_color,
-        )
+        # Do not show separate success/failure bubbles; logs will follow immediately
+        pass
 
         # If execution failed, optionally trigger auto-feedback
         if not success:
@@ -1455,10 +1476,9 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         """Render a single chat message using Qt's native Markdown support when appropriate."""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
-        # Ensure a blank line separates every message
         try:
-            if self.chat_display.toPlainText().strip():
-                cursor.insertText("\n\n")
+            # Hard block separation to avoid messages running together
+            cursor.insertBlock()
         except Exception:
             pass
 
@@ -1479,6 +1499,13 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             bubble_bg_color = "#f1f8e9"
             bubble_border_color = "#aed581"
             bubble_shadow = "0 2px 4px rgba(76, 175, 80, 0.1)"
+
+        # Accent color for a subtle left border to differentiate senders
+        accent_color = "#2e7d32"  # AI default (green-ish)
+        if is_user:
+            accent_color = "#1976d2"  # blue
+        elif is_system:
+            accent_color = "#6c757d"  # gray
 
         # Build content using Markdown for AI messages by default; fallback heuristic otherwise
         ai_message = (not is_user and not is_system)
@@ -1553,10 +1580,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                         '</div>'
                     )
                     pre = (
-                        '<pre style="background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; '
+                        '<pre style="background-color:#f5f5f5; color:#333333; border:1px solid #dddddd; padding:12px; '
                         'border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; margin:0; '
                         'white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; overflow-x:auto;">'
-                        f'<code style="color:#f0f0f0; background:transparent; border:none; padding:0;">{esc}</code>'
+                        f'<code style="color:#333333; background:transparent; border:none; padding:0;">{esc}</code>'
                         '</pre>'
                     )
                     styled_section = (
@@ -1580,15 +1607,23 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             except Exception:
                 formatted_content = str(message)
 
-        # Enhanced message bubble with header separator and shadow
+        # Add a spacer to clearly separate messages
+        try:
+            # Strong spacer to clearly separate messages
+            cursor.insertHtml("<div style='height:16px'>&nbsp;</div>")
+        except Exception:
+            pass
+
+        # Enhanced message bubble with header separator, shadow, and accent border
+        label_sender = "PyQGIS" if is_system else sender
         html = f"""
-        <div style="margin: 8px 5px; text-align: {align};">
-          <div style="display: inline-block; text-align: left; max-width: 90%; padding: 12px 16px; border-radius: 16px; background-color: {bubble_bg_color}; border: 1px solid {bubble_border_color}; box-shadow: {bubble_shadow}; margin: 8px 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;">
+        <div style="margin: 16px 5px; text-align: {align}; clear: both;">
+          <div style="display: inline-block; text-align: left; max-width: 90%; padding: 12px 16px; border-radius: 14px; background-color: {bubble_bg_color}; border: 1px solid {bubble_border_color}; box-shadow: {bubble_shadow}; margin: 0 0 0 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; border-left: 4px solid {accent_color};">
             <div style="margin-bottom: 8px; border-bottom: 1px solid {bubble_border_color}; padding-bottom: 6px;">
-              <strong style="color: {color}; font-size: 11pt;">{sender}</strong>
+              <strong style="color: {color}; font-size: 11pt;">{label_sender}</strong>
               <span style="color: #6c757d; font-size: 9pt; margin-left: 8px;">({timestamp})</span>
             </div>
-            <div style="line-height: 1.5; color: #2c3e50;">
+            <div style="line-height: 1.5; color: #2c3e50; word-break: break-word; overflow-wrap: anywhere;">
               {formatted_content}
             </div>
           </div>
@@ -1596,6 +1631,11 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         """
 
         cursor.insertHtml(html)
+        try:
+            # Ensure a block break after each message container
+            cursor.insertBlock()
+        except Exception:
+            pass
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
 
@@ -1793,7 +1833,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             styled = ensure_style('td', 'border:1px solid #ddd; padding:4px 8px;', styled)
 
             # Code blocks and inline code (enhanced styling)
-            pre_style = 'background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; margin:0; overflow-x:auto;'
+            pre_style = 'background-color:#f5f5f5; color:#333333; border:1px solid #dddddd; padding:12px; border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; margin:0; overflow-x:auto;'
             code_style = 'background:#f0f2f5; color:#c7254e; padding:2px 5px; border-radius:3px; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:1px solid #e1e5e9;'
             
             # Protect <pre> blocks while styling inline <code>
@@ -1817,14 +1857,14 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
             # Merge when style exists
             styled = re.sub(
                 r'(<pre[^>]*>\s*<code[^>]*?)style="([^"]*)"([^>]*>)',
-                lambda m: f"{m.group(1)}style=\"{m.group(2)}; color:#f0f0f0; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;\"{m.group(3)}",
+                lambda m: f"{m.group(1)}style=\"{m.group(2)}; color:#333333; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;\"{m.group(3)}",
                 styled,
                 flags=re.IGNORECASE,
             )
             # Add when style missing on <code> inside <pre>
             styled = re.sub(
                 r'(<pre[^>]*>\s*<code)(?![^>]*style=)([^>]*>)',
-                r'\1 style="color:#f0f0f0; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;"\2',
+                r'\1 style="color:#333333; background:transparent; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; border:none; padding:0;"\2',
                 styled,
                 flags=re.IGNORECASE,
             )
@@ -1923,10 +1963,10 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                                 '</div>'
                             )
                             pre = (
-                                '<pre style="background-color:#1a1a1a; color:#f0f0f0; border:1px solid #333; padding:12px; '
+                                '<pre style="background-color:#f5f5f5; color:#333333; border:1px solid #dddddd; padding:12px; '
                                 'border-radius:0px; border-bottom-left-radius:8px; border-bottom-right-radius:8px; margin:0; '
                                 'white-space:pre-wrap; word-break:break-word; font-family:Consolas,Monaco,Menlo,monospace; font-size:9pt; overflow-x:auto;">'
-                                f'<code style="color:#f0f0f0; background:transparent; border:none; padding:0;">{esc}</code>'
+                                f'<code style="color:#333333; background:transparent; border:none; padding:0;">{esc}</code>'
                                 '</pre>'
                             )
                             styled_section = (
@@ -2069,15 +2109,57 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
         return content
     
     def add_to_execution_results(self, message):
-        """Send live log messages to QGIS Log Messages panel (no in-dialog panel)."""
+        """Append execution log into chat, styled like a terminal (gray background).
+
+        Inserts raw HTML directly to avoid code-header styling and keep a clean log look.
+        """
         try:
             if message is None:
                 return
-            # Normalize to string and avoid trailing newlines duplication
-            text = str(message).rstrip("\n")
-            if not text:
-                return
-            QgsMessageLog.logMessage(text, "QGIS Copilot", level=Qgis.Info)
+            import html as _html
+            # Normalize: strip leading newlines so the top of the gray box isn't blank
+            text = str(message)
+            text = text.lstrip("\n")
+            esc = _html.escape(text)
+
+            cursor = self.chat_display.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            try:
+                cursor.insertBlock()
+            except Exception:
+                pass
+            # Ensure spacing from prior content
+            # One clear empty line before the log block
+            cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
+            ts = datetime.now().strftime("%H:%M:%S")
+            container = (
+                "<div style=\"margin:12px 5px; text-align:left;\">"
+                "<div style=\"display:inline-block; max-width:90%; background:#ffffff; border:1px solid #e0e0e0; "
+                "border-radius:14px; box-shadow:0 2px 6px rgba(0,0,0,0.08); border-left:4px solid #6c757d;\">"
+                "<div style=\"padding:8px 12px; border-bottom:1px solid #e0e0e0;\">"
+                "<strong style=\"color:#6c757d; font-size:11pt;\">PyQGIS</strong>"
+                f"<span style=\"color:#6c757d; font-size:9pt; margin-left:8px;\">({ts})</span>"
+                "</div>"
+                "<div style=\"background:#f5f5f5; color:#333; border:1px solid #ddd; border-top:none; "
+                "padding:8px 10px; border-bottom-left-radius:14px; border-bottom-right-radius:14px; "
+                "font-family:Consolas,Menlo,monospace; font-size:9pt; white-space:pre-wrap; word-break:break-word;\">"
+                f"{esc}"
+                "</div>"
+                "</div>"
+                "</div>"
+            )
+            cursor.insertHtml(container)
+            # Add bottom spacer so sequential logs don't appear joined
+            try:
+                cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
+            except Exception:
+                pass
+            try:
+                cursor.insertBlock()
+            except Exception:
+                pass
+            self.chat_display.setTextCursor(cursor)
+            self.chat_display.ensureCursorVisible()
         except Exception:
             pass
     
@@ -2330,7 +2412,7 @@ Tip: Ensure the Ollama daemon is running on <code>http://localhost:11434</code>.
                             break
                     try:
                         self._last_saved_task_path = self.pyqgis_executor.save_response_to_task_file(
-                            self.last_response, filename_hint=filename_hint
+                            self.last_response, filename_hint=filename_hint, quiet=True
                         )
                     except Exception:
                         self._last_saved_task_path = None

@@ -7,7 +7,7 @@ import json
 import re
 import html
 from datetime import datetime
-from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QSettings
+from qgis.PyQt.QtCore import Qt, QUrl, QTimer, QSettings, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QTextEdit, QLineEdit,
     QPushButton, QToolButton, QMenu, QSplitter, QLabel, QCheckBox, QGroupBox, QLayout,
@@ -28,6 +28,9 @@ from . import web_kb
 
 class CopilotChatDialog(QDialog):
     """Main dialog for QGIS Copilot chat interface"""
+    # Broadcast hook for external UIs (e.g., QML/QWidget dock)
+    # role: 'user' | 'assistant' | 'system', text, iso_timestamp
+    chat_message_added = pyqtSignal(str, str, str)
     
     def __init__(self, iface, parent=None):
         super(CopilotChatDialog, self).__init__(parent)
@@ -1466,7 +1469,9 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     
     def add_to_chat(self, sender, message, color):
         """Add a message to the chat display and history"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        now_dt = datetime.now()
+        timestamp = now_dt.strftime("%H:%M:%S")
+        iso_ts = now_dt.isoformat()
         
         # Store in history
         msg_id = (self.chat_history[-1]['id'] + 1) if self.chat_history else 1
@@ -1502,6 +1507,18 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.render_message(sender, message, color, timestamp)
         try:
             del self._current_render_msg_id
+        except Exception:
+            pass
+
+        # Emit a broadcast signal for external UIs (QML/QWidget chat dock)
+        try:
+            role = 'assistant'
+            if sender == 'You':
+                role = 'user'
+            elif sender == 'System':
+                role = 'system'
+            if hasattr(self, 'chat_message_added') and callable(getattr(self, 'chat_message_added').emit):
+                self.chat_message_added.emit(role, message, iso_ts)
         except Exception:
             pass
 

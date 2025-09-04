@@ -69,18 +69,10 @@ class QMLChatDock(QObject):
                     qml_path = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel.qml')
                     qw.setSource(QUrl.fromLocalFile(qml_path))
                     root = qw.rootObject()
-                    # If root failed to load, first try a minimal fallback QML
-                    if root is None:
-                        try:
-                            qml_path_min = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel_min.qml')
-                            qw.setSource(QUrl.fromLocalFile(qml_path_min))
-                            root = qw.rootObject()
-                        except Exception:
-                            root = None
-                    # If still failed, present an inline error widget with details
+                    # If root failed to load, present an inline error widget with details
                     if root is None:
                         err = getattr(qw, 'errors', lambda: [])()
-                        msg = "Failed to load QML ChatPanel (and fallback).\n"
+                        msg = "Failed to load QML ChatPanel.qml.\n"
                         try:
                             if err:
                                 msg += "\n".join([str(e.toString() if hasattr(e, 'toString') else e) for e in err])
@@ -115,16 +107,8 @@ class QMLChatDock(QObject):
                     widget = QWidget.createWindowContainer(qv, dock)
                     root = qv.rootObject()
                     if root is None:
-                        # Try minimal fallback first
-                        try:
-                            qml_path_min = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel_min.qml')
-                            qv.setSource(QUrl.fromLocalFile(qml_path_min))
-                            root = qv.rootObject()
-                        except Exception:
-                            root = None
-                    if root is None:
                         err = getattr(qv, 'errors', lambda: [])()
-                        msg = "Failed to load QML ChatPanel (and fallback).\n"
+                        msg = "Failed to load QML ChatPanel.qml.\n"
                         try:
                             if err:
                                 msg += "\n".join([str(e.toString() if hasattr(e, 'toString') else e) for e in err])
@@ -316,16 +300,19 @@ class QMLChatDock(QObject):
                     self.dialog.pyqgis_executor.execute_code(code)
                 # Do not emit extra chat noise; detailed logs are mirrored via executor logs.
             else:
-                # If the message looks like code (no fences), run it; else treat as prompt
-                if self._looks_like_code(msg):
-                    self.on_run_code(msg)
-                    return
-                # Treat as prompt: forward to Copilot dialog
+                # Treat as prompt when no explicit fenced code is present.
+                # Show it in the main dialog chat and send programmatically to avoid UI coupling.
                 try:
-                    self.dialog.message_input.setText(msg)
+                    # Add the user message to the main dialog chat (mirrors to QML via signal)
+                    if hasattr(self.dialog, 'add_to_chat'):
+                        self.dialog.add_to_chat("You", msg, "#007bff")
                 except Exception:
                     pass
-                self.dialog.send_message()
+                try:
+                    # Send directly to the provider with all current options/context
+                    self.dialog.send_message(msg, is_programmatic=True)
+                except Exception:
+                    pass
         except Exception:
             pass
 

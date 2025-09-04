@@ -4,385 +4,374 @@ import QtQuick.Layouts 1.12
 
 Rectangle {
     id: root
-    width: 420
-    height: 620
-    color: "#f5f5f5"
-    // Bubble sizing guidance relative to dialog
-    property real minBubbleWidthFactor: 0.45   // 45% of dialog width (minimum)
-    property real maxBubbleWidthFactor: 0.86   // 86% of dialog width (maximum)
-    property real maxBubbleHeightFactor: 0.40  // 40% of dialog height (maximum visible before scrolling)
+    width: 920
+    height: 640
+    color: "#f6f7fb"            // light chat background
 
-    // Provided by Python bridge; fallback to figures folder next to this QML
-    property url assetsDir: Qt.resolvedUrl("../figures")   // e.g., file:///.../plugins/QGIS-Copilot/figures
-    // AI identity shown in the sender line
-    // Model name is displayed for the AI (e.g., "gpt-4o"); provider is used only as a fallback
-    property string aiModelName: ""         // e.g., "gpt-4o"
-    property string aiProviderName: "AI"    // e.g., "Ollama", "ChatGPT", "Gemini" (fallback only)
+    // ---- Properties set by qml_chat_dock.py ----
+    // Example: file:///.../plugins/QGIS-Copilot/figures
+    property url assetsDir: Qt.resolvedUrl("../figures")
+    property string aiModelName: ""      // e.g., "Llama 3.1 70B"
+    property string aiProviderName: ""   // e.g., "Ollama (Local)"
 
+    // ---- Role presentation ----
+    readonly property var roleToIcon: ({
+        "user": assetsDir + "/user.png",
+        "assistant": assetsDir + "/copilot.png",  // assistant icon in your repo
+        "qgis": assetsDir + "/qgis.png",
+        "system": assetsDir + "/copilot.png"
+    })
+    readonly property var roleToName: ({
+        "user": "You",
+        "assistant": aiModelName && aiModelName.length ? aiModelName :
+                      (aiProviderName && aiProviderName.length ? aiProviderName : "AI Model"),
+        "qgis": "QGIS",
+        "system": "System"
+    })
+    readonly property var roleToBubble: ({
+        "user":    "#e7f3ff",   // light blue
+        "assistant": "#fff1e6", // light peach
+        "qgis":    "#eaf7ea",   // light green
+        "system":  "#eef0f3"    // neutral light gray
+    })
+    readonly property color bubbleText:  "#1a1a1a"
+    readonly property color faintText:   "#6e6e6e"
+    readonly property color divider:     "#e2e4ea"
+
+    // ---- Signals the dock connects ----
     signal copyRequested(string text)
     signal editRequested(string text)
-    signal runRequested(string text)         // used for sending prompts/user messages
-    signal runCodeRequested(string code)     // used for executing code blocks
-    signal debugRequested(string code)       // used to trigger AI debug on last error
+    signal runRequested(string text)
+    signal runCodeRequested(string code)
+    signal debugRequested(string info)
 
-    // Simple message store
+    // ---- Model the dock calls into via root.appendMessage(role, text, ts) ----
     ListModel { id: chatModel }
 
-    // Split message text into blocks: [{kind:'text'|'code', body:string, lang:string}]
-    function parseBlocks(src) {
-        var s = src || "";
-        var re = /(~~~|```)([a-zA-Z0-9_-]*)[ \t]*\r?\n([\s\S]*?)\r?\n?\1/gm;
-        var out = [];
-        var last = 0;
-        var m;
-        while ((m = re.exec(s)) !== null) {
-            if (m.index > last) {
-                out.push({ kind: 'text', body: s.substring(last, m.index) });
+    // ---- Methods callable from Python (QMetaObject.invokeMethod) ----
+    function appendMessage(role, text, ts) {
+        // role: "user" | "assistant" | "qgis" | "system"
+        var r = role || "assistant"
+        var t = text || ""
+        var iso = ts && ts.length ? ts : new Date().toISOString()
+        // Lightweight de-duplication (prevents echoing the same user msg twice)
+        if (chatModel.count > 0) {
+            var last = chatModel.get(chatModel.count - 1)
+            if (last && last.role === r && last.text === t) {
+                return
             }
-            out.push({ kind: 'code', body: m[3], lang: (m[2]||'').toLowerCase() });
-            last = re.lastIndex;
         }
-        if (last < s.length) {
-            out.push({ kind: 'text', body: s.substring(last) });
-        }
-        if (out.length === 0) {
-            out.push({ kind: 'text', body: s });
-        }
-        return out;
+        chatModel.append({ role: r, text: t, ts: iso })
+        chatView.positionViewAtIndex(chatModel.count-1, ListView.End)
     }
 
-    function appendMessage(role, text, isoTimestamp) {
-        chatModel.append({
-            "role": role,
-            "text": text,
-            "timestamp": isoTimestamp && isoTimestamp.length ? isoTimestamp : new Date().toISOString()
-        })
-        Qt.callLater(function() { chatView.positionViewAtEnd(); });
-    }
-
+    // ---- Header ----
     Rectangle {
-        height: 40
-        width: parent.width
+        id: header
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 56
         color: "#ffffff"
-        border.color: "#e0e0e0"
-        anchors.top: parent.top
-
-        Text {
-            text: "QGIS Copilot"
-            anchors.centerIn: parent
-            font.pixelSize: 14
-            font.bold: true
-            color: "#333333"
-        }
-    }
-
-    ListView {
-        id: chatView
-        anchors { top: parent.top; topMargin: 42; left: parent.left; right: parent.right; bottom: inputBar.top }
-        model: chatModel
-        spacing: 10
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-
-        delegate: Item {
-            id: row
-            width: chatView.width
-            height: signRow.implicitHeight + bubble.implicitHeight + (overflowControls.visible ? overflowControls.implicitHeight + 4 : 0) + 8
-
-            readonly property bool isUser: role === "user"
-            // Light role-specific colors: User (blue), AI (green), QGIS (gray)
-            readonly property color bubbleColor: (role === 'user') ? "#d7ecff" : ((role === 'assistant') ? "#e8f6ec" : "#f1f3f5")
-            readonly property color borderColor: "#d3d3d3"
-            // Display model name for AI (fallback to provider/AI); You/QGIS for others
-            readonly property string displayName: (role === 'user' ? 'You'
-                                                    : (role === 'assistant'
-                                                        ? ((root.aiModelName && root.aiModelName.length)
-                                                            ? root.aiModelName
-                                                            : ((root.aiProviderName && root.aiProviderName.length) ? root.aiProviderName : 'AI'))
-                                                        : 'QGIS'))
-            readonly property url displayIconPath: (role === 'user' ? (root.assetsDir + '/user.png') : (role === 'assistant' ? (root.assetsDir + '/copilot.png') : (root.assetsDir + '/qgis.png')))
-            property var blocks: parseBlocks(model.text)
-            property string roleName: role
-            readonly property bool hasError: (model.text.indexOf("❌") >= 0) || (model.text.indexOf("Error") >= 0)
-            // Measure the natural content width (no hard wrapping) to size bubble to text length
-            readonly property real measuredContentWidth: measureColumn.implicitWidth
-
-            // Sender sign outside bubble (icon + name + time)
-            Row {
-                id: signRow
-                spacing: 8
-                layoutDirection: row.isUser ? Qt.RightToLeft : Qt.LeftToRight
-                anchors {
-                    left: row.isUser ? undefined : parent.left
-                    right: row.isUser ? parent.right : undefined
-                    top: parent.top
-                    leftMargin: 12
-                    rightMargin: 12
-                    topMargin: 2
-                }
-                HoverHandler { id: hoverSign; acceptedDevices: PointerDevice.Mouse }
-                // Icon
-                Image {
-                    id: iconImg
-                    source: row.displayIconPath
-                    width: 32; height: 32
-                    fillMode: Image.PreserveAspectFit
-                    smooth: true
-                    mipmap: true
-                    visible: status === Image.Ready
-                }
-                // Name
-                Text {
-                    text: row.displayName
-                    color: "#444"
-                    font.pixelSize: 12
-                    font.bold: true
-                }
-                // Time (short; shows exact ISO on hover)
-                Text {
-                    id: signTime
-                    text: hoverSign.hovered ? model.timestamp : formatTime(model.timestamp)
-                    color: "#666"
-                    font.pixelSize: 11
-                }
-            }
-
-            Rectangle {
-                id: bubble
-                radius: 12
-                color: row.bubbleColor
-                border.color: row.borderColor
-                border.width: 1
-                anchors {
-                    left: row.isUser ? undefined : parent.left
-                    right: row.isUser ? parent.right : undefined
-                    leftMargin: 10
-                    rightMargin: 10
-                    top: signRow.bottom
-                    topMargin: 4
-                }
-                // Size relative to text length and dialog size (no internal scroll)
-                width: Math.max(root.width * root.minBubbleWidthFactor,
-                                Math.min(root.width * root.maxBubbleWidthFactor, row.measuredContentWidth + 24))
-                implicitHeight: contentClip.height + 12
-
-                // Content clip for elegant expand/collapse
-                Item {
-                    id: contentClip
-                    clip: true
-                    anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; leftMargin: 12; rightMargin: 12; topMargin: 8; bottomMargin: 8 }
-                    // Expand/collapse height
-                    property bool expanded: false
-                    property real collapsedMaxHeight: root.height * root.maxBubbleHeightFactor
-                    property bool isOverflowing: contentColumn.implicitHeight > collapsedMaxHeight
-                    height: expanded ? contentColumn.implicitHeight : Math.min(contentColumn.implicitHeight, collapsedMaxHeight)
-
-                    Column {
-                        id: contentColumn
-                        width: contentClip.width
-                        spacing: 6
-
-                        Repeater {
-                            model: row.blocks
-                            delegate: Item {
-                                width: contentColumn.width
-                                height: blkText.implicitHeight
-                                property var entry: modelData
-
-                                // Text block (Markdown)
-                                Text {
-                                    id: blkText
-                                    visible: entry.kind === 'text'
-                                    text: entry.body
-                                    textFormat: Text.MarkdownText
-                                    wrapMode: Text.Wrap
-                                    font.pixelSize: 13
-                                    color: "#222222"
-                                    width: parent.width
-                                }
-
-                                // Code block (monospace + actions)
-                                Rectangle {
-                                    id: codeBlock
-                                    visible: entry.kind === 'code'
-                                    width: parent.width
-                                    radius: 6
-                                    color: "#f5f5f5"
-                                    border.color: "#dddddd"
-                                    border.width: 1
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    // Height from code text + padding
-                                    implicitHeight: codeText.implicitHeight + 28
-
-                                    // Per-code-block actions (hover reveal)
-                                    HoverHandler { id: codeHover; acceptedDevices: PointerDevice.Mouse }
-                                    Row {
-                                        spacing: 6
-                                        visible: codeHover.hovered
-                                        anchors { top: parent.top; right: parent.right; topMargin: 4; rightMargin: 6 }
-                                        z: 10
-                                    Repeater {
-                                        // For AI messages: Copy/Edit/Run
-                                        // For QGIS (system): Debug only when error and this is the logs block (no language)
-                                        model: (row.roleName === 'assistant') ? [
-                                                {label: "Copy",  kind: "copy"},
-                                                {label: "Edit",  kind: "edit"},
-                                                {label: "Run",   kind: "run"}
-                                            ] : ((row.roleName === 'system' && row.hasError && (!entry.lang || entry.lang.length === 0)) ? [
-                                                {label: "Debug", kind: "debug"}
-                                            ] : [])
-                                        delegate: Rectangle {
-                                            height: 20
-                                            radius: 10
-                                            color: "#ffffff"
-                                            border.color: "#cfcfcf"
-                                            border.width: 1
-                                            width: Math.max(lbl.implicitWidth + 14, 44)
-                                            Text { id: lbl; text: modelData.label; anchors.centerIn: parent; font.pixelSize: 11; color: "#333333" }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: {
-                                                    if (modelData.kind === 'copy')  root.copyRequested(entry.body);
-                                                    if (modelData.kind === 'edit')  root.editRequested(entry.body);
-                                                    if (modelData.kind === 'run')   root.runCodeRequested(entry.body);
-                                                    if (modelData.kind === 'debug') root.debugRequested(entry.body);
-                                                }
-                                                hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                            }
-                                        }
-                                        }
-                                    }
-
-                                    Text {
-                                        id: codeText
-                                        text: entry.body
-                                        textFormat: Text.PlainText
-                                        wrapMode: Text.Wrap
-                                        font.family: "monospace"
-                                        font.pixelSize: 12
-                                        color: "#333333"
-                                        anchors { left: parent.left; right: parent.right; leftMargin: 8; rightMargin: 8; top: parent.top; topMargin: 22; bottom: parent.bottom; bottomMargin: 6 }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Subtle fade band when collapsed and overflowing
-                    Rectangle {
-                        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                        height: (contentClip.isOverflowing && !contentClip.expanded) ? 18 : 0
-                        visible: contentClip.isOverflowing && !contentClip.expanded
-                        color: Qt.rgba(1,1,1,0.0)
-                    }
-                }
-
-                // Hidden measurement column without forced widths to compute natural content width
-                Column {
-                    id: measureColumn
-                    spacing: 6
-                    visible: false
-                    Repeater {
-                        model: row.blocks
-                        delegate: Item {
-                            width: implicitWidth
-                            height: implicitHeight
-                            property var entry: modelData
-                            Text {
-                                visible: entry.kind === 'text'
-                                text: entry.body
-                                textFormat: Text.MarkdownText
-                                wrapMode: Text.NoWrap
-                                font.pixelSize: 13
-                                color: "transparent"
-                            }
-                            Text {
-                                visible: entry.kind === 'code'
-                                text: entry.body
-                                textFormat: Text.PlainText
-                                wrapMode: Text.NoWrap
-                                font.family: "monospace"
-                                font.pixelSize: 12
-                                color: "transparent"
-                            }
-                        }
-                    }
-                }
-            // Show more / Show less control (outside bubble)
-            Text {
-                id: overflowControls
-                text: contentClip.expanded ? "Show less" : "Show more"
-                color: "#0b5ed7"
-                font.pixelSize: 12
-                visible: contentClip.isOverflowing
-                anchors {
-                    right: bubble.right
-                    top: bubble.bottom
-                    rightMargin: 4
-                    topMargin: 4
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: { contentClip.expanded = !contentClip.expanded }
-                }
-            }
-
-        }
-
-        onCountChanged: Qt.callLater(function(){ chatView.positionViewAtEnd() })
-        Component.onCompleted: positionViewAtEnd()
-    }
-
-    // Floating composer: only two rounded controls (message box + send)
-    Rectangle {
-        id: inputBar
-        height: 54
-        anchors {
-            left: parent.left
-            right: parent.right
-            bottom: parent.bottom
-            leftMargin: 10
-            rightMargin: 10
-            bottomMargin: 10
-        }
-        color: "transparent"
-        border.color: "transparent"
+        border.color: divider
+        border.width: 1
 
         RowLayout {
             anchors.fill: parent
-            anchors.margins: 8
+            anchors.margins: 12
+            spacing: 12
+
+            Label {
+                text: "QGIS Copilot"
+                font.pixelSize: 18
+                font.bold: true
+                color: "#2a2a2a"
+                Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+            }
+
+            Rectangle { Layout.fillWidth: true; color: "transparent" }
+
+            // Provider / Model
+            Row {
+                spacing: 8
+                Rectangle { width: 10; height: 10; radius: 5; color: "#36c" } // small accent
+                Label {
+                    text: (aiProviderName && aiProviderName.length ? aiProviderName : "AI") +
+                          (aiModelName && aiModelName.length ? (" • " + aiModelName) : "")
+                    color: faintText
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+            }
+        }
+    }
+
+    // ---- Chat list ----
+    ListView {
+        id: chatView
+        anchors.top: header.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: composer.top
+        anchors.margins: 8
+        clip: true
+        spacing: 10
+        model: chatModel
+
+        ScrollBar.vertical: ScrollBar { }
+
+        delegate: Item {
+            id: rowRoot
+            width: ListView.view.width
+            // Height adapts to gutter + bubble + hover controls
+            height: Math.max(leftGutter.implicitHeight, bubble.implicitHeight) + 10
+
+            // Parse once
+            // Avoid shadowing Text.text by capturing roles under different names
+            property string messageRole: (typeof role !== 'undefined' && role ? role : "assistant")
+            property string messageText: (typeof text !== 'undefined' ? text : "")
+            property string messageTs: (typeof ts !== 'undefined' ? ts : "")
+            property string roleNorm: (messageRole || "assistant").toLowerCase()
+            property bool   isUser: roleNorm === "user"
+            property bool   isAssistant: roleNorm === "assistant"
+            property bool   isQgis: roleNorm === "qgis"
+            property bool   isCode: /\x60\x60\x60/.test(messageText) // has ``` somewhere
+            property string codeExtract: extractCode(messageText)
+
+            // Gutter (avatar + name + time). Right for user, left otherwise.
+            Column {
+                id: leftGutter
+                width: 92
+                anchors.left: isUser ? undefined : parent.left
+                anchors.right: isUser ? parent.right : undefined
+                anchors.leftMargin: isUser ? 0 : 4
+                anchors.rightMargin: isUser ? 4 : 0
+                spacing: 4
+
+                Rectangle {
+                    id: avatarFrame
+                    width: 36; height: 36; radius: 18
+                    color: "#ffffff"
+                    border.color: divider
+                    clip: true
+                    anchors.left: isUser ? undefined : parent.left
+                    anchors.right: isUser ? parent.right : undefined
+
+                    Image {
+                        anchors.fill: parent
+                        source: roleToIcon[roleNorm] || (assetsDir + "/copilot.png")
+                        sourceSize.width: 36
+                        sourceSize.height: 36
+                        fillMode: Image.PreserveAspectFit
+                        antialiasing: true
+                        smooth: true
+                    }
+                }
+
+                Label {
+                    text: roleToName[roleNorm] || "Participant"
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: "#3a3a3a"
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                    width: parent.width
+                    horizontalAlignment: isUser ? Text.AlignRight : Text.AlignLeft
+                }
+
+                // Time is shown inside the message bubble footer; omit here to avoid duplication.
+            }
+
+            // Bubble rail: right for user, left for others
+            Item {
+                id: rail
+                anchors.left: isUser ? parent.left : leftGutter.right
+                anchors.right: isUser ? leftGutter.left : parent.right
+                anchors.top: parent.top
+                anchors.margins: 2
+                height: bubble.implicitHeight
+
+                Rectangle {
+                    id: bubble
+                    radius: 14
+                    border.width: 1
+                    border.color: "#00000010"
+                    color: roleToBubble[roleNorm] || "#ffffff"
+
+                    // Position: user -> right, others -> left
+                    anchors.top: parent.top
+                    anchors.margins: 2
+                    anchors.right: isUser ? parent.right : undefined
+                    anchors.left: !isUser ? parent.left : undefined
+
+                    // Width clamp
+                    // Measure natural (unwrapped) text width, then clamp to rail
+                    property int maxW: Math.floor(parent.width * 0.66)
+                    width: Math.min(measureText.implicitWidth + 24, maxW)
+                    implicitHeight: contentCol.implicitHeight + 24
+
+                    // Invisible measurer to compute natural content width
+                    Text {
+                        id: measureText
+                        visible: false
+                        text: messageText
+                        textFormat: Text.RichText
+                        wrapMode: Text.NoWrap
+                        font.pixelSize: 14
+                    }
+
+                    // Content + footer time inside bubble
+                    Column {
+                        id: contentCol
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 6
+
+                        // Rich text to support HTML (plugin sometimes appends html_text)
+                        Text {
+                            id: textContent
+                            text: messageText
+                            // Render AI replies as Markdown; others as plain text
+                            textFormat: isAssistant ? Text.MarkdownText : Text.PlainText
+                            color: bubbleText
+                            // Wrap anywhere to keep all content inside the bubble
+                            wrapMode: Text.WrapAnywhere
+                            width: parent.width
+                            font.pixelSize: 14
+                            onLinkActivated: function(url) {
+                                // Let Python side handle anchors if needed
+                                root.debugRequested("link:" + url)
+                            }
+                        }
+
+                        // Timestamp at bottom of bubble
+                        Label {
+                            id: bubbleTime
+                            text: formatTs(messageTs)
+                            color: faintText
+                            font.pixelSize: 11
+                            width: parent.width
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    // Hover actions (Copy / Edit / Run when code present)
+                    MouseArea {
+                        id: hover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                    }
+
+                    Row {
+                        id: actions
+                        spacing: 6
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: 6
+                        visible: hover.containsMouse
+
+                        Button {
+                            id: copyBtn
+                            text: "Copy"
+                            padding: 6
+                            font.pixelSize: 11
+                            visible: (isAssistant || isQgis)
+                            onClicked: root.copyRequested(isCode && codeExtract.length ? codeExtract : messageText)
+                        }
+                        Button {
+                            id: editBtn
+                            text: "Edit"
+                            padding: 6
+                            font.pixelSize: 11
+                            onClicked: root.editRequested(isCode && codeExtract.length ? codeExtract : messageText)
+                        }
+                        Button {
+                            id: runBtn
+                            text: "Run"
+                            padding: 6
+                            font.pixelSize: 11
+                            visible: isCode
+                            onClicked: {
+                                if (isCode && codeExtract.length) root.runCodeRequested(codeExtract)
+                                else root.runRequested(messageText)
+            }
+        }
+                    }
+                }
+            }
+
+            // Util: code extraction (first fenced block; join multiple)
+            function extractCode(txt) {
+                if (!txt) return "";
+                // Match ```lang?\n ... \n``` (multiline, global)
+                var re = /```[a-zA-Z0-9_+-]*\s*([\s\S]*?)```/g;
+                var m, parts = [];
+                while ((m = re.exec(txt)) !== null) parts.push(m[1]);
+                if (parts.length === 0) return "";
+                return parts.join("\n\n").trim();
+            }
+
+            function formatTs(iso) {
+                try {
+                    // QML can format ISO strings in a friendly way
+                    var d = new Date(iso);
+                    var hh = ("0" + d.getHours()).slice(-2);
+                    var mm = ("0" + d.getMinutes()).slice(-2);
+                    return hh + ":" + mm;
+                } catch(e) { return ""; }
+            }
+        }
+    }
+
+    // ---- Composer ----
+    Rectangle {
+        id: composer
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 64
+        color: "#ffffff"
+        border.color: divider
+        border.width: 1
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 10
             spacing: 8
 
             TextField {
                 id: input
                 Layout.fillWidth: true
                 placeholderText: "Type a message…"
-                font.pixelSize: 14
+                Accessible.name: "Message input"
                 onAccepted: sendBtn.clicked()
-                // Rounded message box
-                implicitHeight: 40
+                hoverEnabled: true
                 background: Rectangle {
                     radius: 18
-                    color: "#ffffff"
-                    border.color: "#e0e0e0"
+                    color: input.hovered ? "#f8f9fb" : "#ffffff"
                     border.width: 1
+                    border.color: input.activeFocus ? "#0b5ed7" : (input.hovered ? "#c7cfdd" : "#e2e6ee")
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    Behavior on border.color { ColorAnimation { duration: 120 } }
                 }
-                leftPadding: 10
-                rightPadding: 10
             }
 
             Button {
                 id: sendBtn
                 text: "Send"
-                implicitHeight: 40
-                implicitWidth: 80
-                // Rounded send button
+                Accessible.name: "Send message"
+                enabled: (input.text || "").trim().length > 0
+                hoverEnabled: true
                 background: Rectangle {
                     radius: 18
-                    color: "#0b5ed7"
-                    border.color: "#0a58ca"
+                    color: !sendBtn.enabled ? "#b9d0f5"
+                          : sendBtn.pressed ? "#0a58ca"
+                          : sendBtn.hovered ? "#0b66f0"
+                          : "#0b5ed7"
+                    border.width: 1
+                    border.color: !sendBtn.enabled ? "#9bb9e8" : "#0a58ca"
+                    Behavior on color { ColorAnimation { duration: 100 } }
                 }
                 contentItem: Text {
                     text: sendBtn.text
@@ -392,25 +381,15 @@ Rectangle {
                     verticalAlignment: Text.AlignVCenter
                 }
                 onClicked: {
-                    if (!input.text || !input.text.trim().length) return;
-                    // Use runRequested as a submit signal to Python side;
-                    // the main dialog will broadcast back the message to render.
-                    root.runRequested(input.text.trim());
+                    var msg = (input.text || "").trim();
+                    if (!msg.length) return;
+                    // Echo immediately
+                    root.appendMessage('user', msg, "");
+                    // Forward to Python bridge
+                    root.runRequested(msg);
                     input.text = "";
                 }
             }
         }
-    }
-
-    function pad2(n) { return (n < 10 ? "0" : "") + n }
-    function formatTime(iso) {
-        var d = iso && iso.length ? new Date(iso) : new Date();
-        if (isNaN(d.getTime())) d = new Date();
-        var Y = d.getFullYear()
-        var M = pad2(d.getMonth()+1)
-        var D = pad2(d.getDate())
-        var h = pad2(d.getHours())
-        var m = pad2(d.getMinutes())
-        return Y + "-" + M + "-" + D + " " + h + ":" + m
     }
 }

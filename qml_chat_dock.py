@@ -20,28 +20,31 @@ class QMLChatDock(QObject):
         self._view = None
 
     def _detect_qml_backend(self):
-        """Return 'quickwidget', 'quickview', or None depending on availability."""
-        # Prefer QQuickWidget (embeds into QWidget cleanly)
-        try:
-            from qgis.PyQt.QtQuickWidgets import QQuickWidget  # noqa: F401
-            return 'quickwidget'
-        except Exception:
-            pass
-        # Next, try QQuickView via qgis shim
+        """Return 'quickview', 'quickwidget', or None depending on availability.
+
+        Prefer QQuickView for stability (QQuickWidget is known to be crash‑prone on some Qt/OS combos).
+        """
+        # Prefer QQuickView via qgis shim
         try:
             from qgis.PyQt.QtQuick import QQuickView  # noqa: F401
             return 'quickview'
         except Exception:
             pass
-        # Finally, try PyQt5 direct imports
+        # Then try QQuickView via PyQt5
         try:
-            from PyQt5.QtQuickWidgets import QQuickWidget  # noqa: F401
+            from PyQt5.QtQuick import QQuickView  # noqa: F401
+            return 'quickview'
+        except Exception:
+            pass
+        # Fallback to QQuickWidget (embeds into QWidget but can be less stable)
+        try:
+            from qgis.PyQt.QtQuickWidgets import QQuickWidget  # noqa: F401
             return 'quickwidget'
         except Exception:
             pass
         try:
-            from PyQt5.QtQuick import QQuickView  # noqa: F401
-            return 'quickview'
+            from PyQt5.QtQuickWidgets import QQuickWidget  # noqa: F401
+            return 'quickwidget'
         except Exception:
             pass
         return None

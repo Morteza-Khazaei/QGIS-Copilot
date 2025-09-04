@@ -19,14 +19,14 @@ Rectangle {
         "user": assetsDir + "/user.png",
         "assistant": assetsDir + "/copilot.png",  // assistant icon in your repo
         "qgis": assetsDir + "/qgis.png",
-        "system": assetsDir + "/copilot.png"
+        "system": assetsDir + "/qgis.png"         // show system as QGIS
     })
     readonly property var roleToName: ({
         "user": "You",
         "assistant": aiModelName && aiModelName.length ? aiModelName :
                       (aiProviderName && aiProviderName.length ? aiProviderName : "AI Model"),
         "qgis": "QGIS",
-        "system": "System"
+        "system": "QGIS"   // rename system messages from PyQGIS to QGIS
     })
     readonly property var roleToBubble: ({
         "user":    "#e7f3ff",   // light blue
@@ -63,6 +63,23 @@ Rectangle {
         }
         chatModel.append({ role: r, text: t, ts: iso })
         chatView.positionViewAtIndex(chatModel.count-1, ListView.End)
+    }
+
+    // ---- Markdown block parser (text vs fenced code) ----
+    function parseBlocks(src) {
+        var s = src || "";
+        var re = /(~~~|```)([a-zA-Z0-9_+-]*)[ \t]*\r?\n([\s\S]*?)\r?\n?\1/gm;
+        var out = [];
+        var last = 0;
+        var m;
+        while ((m = re.exec(s)) !== null) {
+            if (m.index > last) out.push({ kind: 'text', body: s.substring(last, m.index) });
+            out.push({ kind: 'code', body: m[3], lang: (m[2]||'').toLowerCase() });
+            last = re.lastIndex;
+        }
+        if (last < s.length) out.push({ kind: 'text', body: s.substring(last) });
+        if (out.length === 0) out.push({ kind: 'text', body: s });
+        return out;
     }
 
     // ---- Header ----
@@ -123,6 +140,7 @@ Rectangle {
             property bool   isQgis: roleNorm === "qgis"
             property bool   isCode: /\x60\x60\x60/.test(messageText) // has ``` somewhere
             property string codeExtract: extractCode(messageText)
+            property var    blocks: parseBlocks(messageText)
 
             // Gutter (avatar + name + time). Right for user, left otherwise.
             Column {
@@ -213,20 +231,91 @@ Rectangle {
                         anchors.margins: 12
                         spacing: 6
 
-                        // Rich text to support HTML (plugin sometimes appends html_text)
-                        Text {
-                            id: textContent
-                            text: messageText
-                            // Render AI replies as Markdown; others as plain text
-                            textFormat: isAssistant ? Text.MarkdownText : Text.PlainText
-                            color: bubbleText
-                            // Wrap anywhere to keep all content inside the bubble
-                            wrapMode: Text.WrapAnywhere
-                            width: parent.width
-                            font.pixelSize: 14
-                            onLinkActivated: function(url) {
-                                // Let Python side handle anchors if needed
-                                root.debugRequested("link:" + url)
+                        // Render message as blocks so code blocks can have per-block actions
+                        Repeater {
+                            model: blocks
+                            delegate: Item {
+                                width: contentCol.width
+                                height: (blkText.visible ? blkText.implicitHeight
+                                        : (codeWrap.visible ? codeWrap.implicitHeight : 0))
+                                property var entry: modelData
+
+                                // Text block (Markdown for assistant; plain for others)
+                                Text {
+                                    id: blkText
+                                    visible: entry.kind === 'text'
+                                    text: entry.body
+                                    textFormat: isAssistant ? Text.MarkdownText : Text.PlainText
+                                    color: bubbleText
+                                    wrapMode: Text.WrapAnywhere
+                                    width: parent.width
+                                    font.pixelSize: 14
+                                    onLinkActivated: function(url) { root.debugRequested("link:" + url) }
+                                }
+
+                                // Code block with per-block actions (assistant only)
+                                Rectangle {
+                                    id: codeWrap
+                                    visible: entry.kind === 'code'
+                                    width: parent.width
+                                    radius: 6
+                                    color: "#f5f5f5"
+                                    border.color: "#dddddd"
+                                    border.width: 1
+                                    implicitHeight: codeText.implicitHeight + 28
+
+                                    // Hover-only actions header
+                                    MouseArea { id: codeHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                                    Row {
+                                        spacing: 4
+                                        anchors.top: parent.top
+                                        anchors.right: parent.right
+                                        anchors.topMargin: 4
+                                        anchors.rightMargin: 6
+                                        visible: isAssistant && codeHover.containsMouse
+
+                                        Button {
+                                            text: "Copy"
+                                            padding: 4
+                                            font.pixelSize: 10
+                                            implicitHeight: 22
+                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            onClicked: root.copyRequested(entry.body)
+                                        }
+                                        Button {
+                                            text: "Edit"
+                                            padding: 4
+                                            font.pixelSize: 10
+                                            implicitHeight: 22
+                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            onClicked: root.editRequested(entry.body)
+                                        }
+                                        Button {
+                                            text: "Run"
+                                            padding: 4
+                                            font.pixelSize: 10
+                                            implicitHeight: 22
+                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            onClicked: root.runCodeRequested(entry.body)
+                                        }
+                                    }
+
+                                    Text {
+                                        id: codeText
+                                        text: entry.body
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.WrapAnywhere
+                                        font.family: "monospace"
+                                        font.pixelSize: 13
+                                        color: "#333333"
+                                        anchors {
+                                            left: parent.left; right: parent.right
+                                            leftMargin: 8; rightMargin: 8
+                                            top: parent.top; topMargin: 22
+                                            bottom: parent.bottom; bottomMargin: 6
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -241,54 +330,7 @@ Rectangle {
                         }
                     }
 
-                    // Hover actions (Copy / Edit / Run when code present)
-                    MouseArea {
-                        id: hover
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.NoButton
-                    }
-
-                    Row {
-                        id: actions
-                        spacing: 4
-                        anchors.top: parent.top
-                        anchors.right: parent.right
-                        anchors.margins: 4
-                        // Show only for assistant messages that contain fenced code, and only on hover
-                        visible: hover.containsMouse && isAssistant && isCode
-
-                        Button {
-                            id: copyBtn
-                            text: "Copy"
-                            padding: 4
-                            font.pixelSize: 10
-                            implicitHeight: 22
-                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                            onClicked: root.copyRequested(isCode && codeExtract.length ? codeExtract : messageText)
-                        }
-                        Button {
-                            id: editBtn
-                            text: "Edit"
-                            padding: 4
-                            font.pixelSize: 10
-                            implicitHeight: 22
-                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                            onClicked: root.editRequested(isCode && codeExtract.length ? codeExtract : messageText)
-                        }
-                        Button {
-                            id: runBtn
-                            text: "Run"
-                            padding: 4
-                            font.pixelSize: 10
-                            implicitHeight: 22
-                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                            onClicked: {
-                                if (isCode && codeExtract.length) root.runCodeRequested(codeExtract)
-                                else root.runRequested(messageText)
-                            }
-                        }
-                    }
+                    // Bubble-level actions removed in favor of per-code-block actions above
                 }
             }
 

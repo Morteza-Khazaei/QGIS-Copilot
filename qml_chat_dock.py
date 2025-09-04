@@ -462,7 +462,7 @@ class QMLChatDock(QObject):
                     out.append(esc)
                 code = m.group(1)
                 code_esc = _html.escape(code)
-                out.append(f'<pre style="margin:6px 0; background:#f5f5f5; color:#333; border:1px solid #ddd; padding:10px; border-radius:6px; white-space:pre-wrap;">{code_esc}</pre>')
+                out.append(f'<pre style="margin:6px 0; background:#f5f5f5; color:#000000; border:1px solid #ddd; padding:10px; border-radius:6px; white-space:pre-wrap;">{code_esc}</pre>')
                 idx = m.end()
             # Tail
             tail = s[idx:]
@@ -607,7 +607,8 @@ class _Bubble(QtWidgets.QFrame):
         edit_btn = QtWidgets.QPushButton("Edit"); edit_btn.setStyleSheet(btn_style)
         run_btn = QtWidgets.QPushButton("Run"); run_btn.setStyleSheet(btn_style)
         actions_l.addWidget(copy_btn); actions_l.addWidget(edit_btn); actions_l.addWidget(run_btn)
-        actions.setVisible(False)
+        actions.setFixedHeight(28)
+        actions.setVisible(True)
 
         # Timestamp
         ts_lbl = QtWidgets.QLabel(self._format_ts(ts))
@@ -625,10 +626,14 @@ class _Bubble(QtWidgets.QFrame):
         outer.addWidget(bubble)
         # timestamp now lives in header; remove footer ts
 
-        # Hover behavior
         self.setAttribute(QtCore.Qt.WA_Hover, True)
+        actions.setAttribute(QtCore.Qt.WA_Hover, True)
         bubble.installEventFilter(self)
         text_lbl.installEventFilter(self)
+        actions.installEventFilter(self)
+        copy_btn.installEventFilter(self)
+        edit_btn.installEventFilter(self)
+        run_btn.installEventFilter(self)
 
         # Button actions
         copy_btn.clicked.connect(lambda: self._copy_cb(text) if callable(self._copy_cb) else None)
@@ -636,14 +641,32 @@ class _Bubble(QtWidgets.QFrame):
         run_btn.clicked.connect(lambda: self._run_cb(text) if callable(self._run_cb) else None)
 
         self._actions = actions
+        self._actions_btns = [copy_btn, edit_btn, run_btn]
+        for _b in self._actions_btns:
+            _b.setVisible(False)
+        self._hide_timer = QtCore.QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(150)
+        self._hide_timer.timeout.connect(self._maybe_hide_actions)
 
     def eventFilter(self, obj, event):
-        # Reveal actions on hover
-        if event.type() in (QtCore.QEvent.HoverEnter, QtCore.QEvent.Enter):
-            self._actions.setVisible(True)
-        elif event.type() in (QtCore.QEvent.HoverLeave, QtCore.QEvent.Leave):
-            self._actions.setVisible(False)
+        et = event.type()
+        if et in (QtCore.QEvent.HoverEnter, QtCore.QEvent.Enter):
+            self._hide_timer.stop()
+            for _b in getattr(self, "_actions_btns", []):
+                _b.setVisible(True)
+        elif et in (QtCore.QEvent.HoverLeave, QtCore.QEvent.Leave):
+            self._hide_timer.start()
         return super().eventFilter(obj, event)
+
+    def _maybe_hide_actions(self):
+        try:
+            if self.underMouse() or (self._actions and self._actions.underMouse()):
+                return
+            for _b in getattr(self, "_actions_btns", []):
+                _b.setVisible(False)
+        except Exception:
+            pass
 
     def _format_ts(self, iso: str) -> str:
         # Very small formatter: use local time if parse fails

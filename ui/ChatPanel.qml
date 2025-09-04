@@ -115,11 +115,15 @@ Rectangle {
         anchors.top: header.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: composer.top
+        // Let chat extend behind the composer to use more space
+        anchors.bottom: parent.bottom
         anchors.margins: 8
         clip: true
         spacing: 10
         model: chatModel
+
+        // Keep a small gap at the very end for readability while composer overlays
+        footer: Item { height: 12 }
 
         ScrollBar.vertical: ScrollBar { }
 
@@ -142,7 +146,7 @@ Rectangle {
             property string codeExtract: extractCode(messageText)
             property var    blocks: parseBlocks(messageText)
 
-            // Gutter (avatar + name + time). Right for user, left otherwise.
+            // Gutter (avatar + name). Right for user, left otherwise; contents centered.
             Column {
                 id: leftGutter
                 width: 80
@@ -158,8 +162,7 @@ Rectangle {
                     color: "#ffffff"
                     border.color: divider
                     clip: true
-                    anchors.left: isUser ? undefined : parent.left
-                    anchors.right: isUser ? parent.right : undefined
+                    anchors.horizontalCenter: parent.horizontalCenter
 
                     Image {
                         anchors.fill: parent
@@ -180,7 +183,7 @@ Rectangle {
                     elide: Text.ElideRight
                     maximumLineCount: 1
                     width: parent.width
-                    horizontalAlignment: isUser ? Text.AlignRight : Text.AlignLeft
+                    horizontalAlignment: Text.AlignHCenter
                 }
 
                 // Time is shown inside the message bubble footer; omit here to avoid duplication.
@@ -307,7 +310,7 @@ Rectangle {
                                         wrapMode: Text.WrapAnywhere
                                         font.family: "monospace"
                                         font.pixelSize: 13
-                                        color: "#333333"
+                                        color: "#000000"    // black code text for higher contrast
                                         anchors {
                                             left: parent.left; right: parent.right
                                             leftMargin: 8; rightMargin: 8
@@ -326,7 +329,7 @@ Rectangle {
                             color: faintText
                             font.pixelSize: 11
                             width: parent.width
-                            horizontalAlignment: Text.AlignRight
+                            horizontalAlignment: isUser ? Text.AlignLeft : Text.AlignRight
                         }
                     }
 
@@ -360,6 +363,7 @@ Rectangle {
     // ---- Composer ----
     Rectangle {
         id: composer
+        z: 10   // overlay above the chat list
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom

@@ -180,84 +180,95 @@ class CopilotChatDialog(QDialog):
             pass
     
     def create_chat_tab(self):
-        """Create the main chat interface tab"""
+        """Create the main chat interface tab (QML ChatPanel)."""
         chat_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Create splitter (single pane now; logs go to QGIS Log Messages)
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Left side - Chat interface
-        chat_container = QWidget()
-        chat_layout = QVBoxLayout()
-        
-        # Chat display area (fully resizable)
-        self.chat_display = QTextBrowser()
-        try:
-            self.chat_display.setMinimumHeight(0)
-            self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        except Exception:
-            pass
-        self.setup_chat_display_style()
-        chat_layout.addWidget(self.chat_display)
-        
-        # Input area
-        input_layout = QHBoxLayout()
-        
-        self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Ask your QGIS Copilot anything...")
-        self.message_input.returnPressed.connect(self.send_message)
-        
-        self.send_button = QPushButton("Send")
-        self.send_button.clicked.connect(self.send_message)
-        
-        # Retry button: disabled until a failure happens
-        self.retry_button = QPushButton("Retry")
-        self.retry_button.clicked.connect(self.on_retry_clicked)
-        self.retry_button.setToolTip("Ask AI to fix the last failed run and retry")
-        try:
-            self.retry_button.setEnabled(False)
-        except Exception:
-            pass
+        layout = QVBoxLayout(chat_widget)
 
-        input_layout.addWidget(self.message_input)
-        input_layout.addWidget(self.send_button)
-        input_layout.addWidget(self.retry_button)
-        
-        chat_layout.addLayout(input_layout)
-        
-        # Preferences have been moved to Settings tab to reduce chat clutter
-        
-        # Chat management buttons
-        chat_management_layout = QHBoxLayout()
-        
+        # Try to render the QML chat; fallback to QTextBrowser if QtQuick is unavailable
+        self.qml_root = None
+        qml_container = None
+        try:
+            try:
+                from qgis.PyQt.QtQuickWidgets import QQuickWidget
+            except Exception:
+                from PyQt5.QtQuickWidgets import QQuickWidget
+            qml_container = QQuickWidget(chat_widget)
+            qml_container.setResizeMode(QQuickWidget.SizeRootObjectToView)
+            qml_path = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel.qml')
+            qml_container.setSource(QUrl.fromLocalFile(qml_path))
+            self.qml_root = qml_container.rootObject()
+        except Exception:
+            qml_container = None
+            self.qml_root = None
+
+        if self.qml_root is not None:
+            # Provide assets directory and initial model/provider names
+            try:
+                from qgis.PyQt.QtCore import QUrl as _QUrl
+                assets_dir = os.path.join(os.path.dirname(__file__), 'figures')
+                assets_url = _QUrl.fromLocalFile(assets_dir).toString()
+                if hasattr(self.qml_root, 'assetsDir'):
+                    self.qml_root.setProperty('assetsDir', assets_url)
+            except Exception:
+                pass
+            try:
+                self.qml_root.setProperty('aiProviderName', getattr(self, 'current_api_name', '') or '')
+            except Exception:
+                pass
+            try:
+                model = getattr(self.current_api, 'model', None)
+                if model:
+                    self.qml_root.setProperty('aiModelName', str(model))
+            except Exception:
+                pass
+
+            # QML → Python wiring
+            try:
+                self.qml_root.copyRequested.connect(self.on_qml_copy)
+                self.qml_root.editRequested.connect(self.on_qml_edit)
+                self.qml_root.runRequested.connect(self.on_qml_run)
+                if hasattr(self.qml_root, 'runCodeRequested'):
+                    self.qml_root.runCodeRequested.connect(self.on_qml_run_code)
+            except Exception:
+                pass
+
+            # Python → QML mirror of messages
+            try:
+                try:
+                    self.chat_message_added.disconnect()
+                except Exception:
+                    pass
+                self.chat_message_added.connect(lambda role, text, ts: self.qml_root.appendMessage(role, text, ts))
+            except Exception:
+                pass
+
+            layout.addWidget(qml_container)
+        else:
+            # Fallback simple chat display
+            fb = QWidget()
+            fb_l = QVBoxLayout(fb)
+            self.chat_display = QTextBrowser()
+            try:
+                self.chat_display.setMinimumHeight(0)
+                self.chat_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            except Exception:
+                pass
+            self.setup_chat_display_style()
+            fb_l.addWidget(self.chat_display)
+            layout.addWidget(fb)
+
+        # Footer row: Clear All + progress bar
+        foot = QHBoxLayout()
         clear_all_button = QPushButton("Clear All")
         clear_all_button.setToolTip("Clear chat history and live logs")
         clear_all_button.clicked.connect(self.clear_all)
-
-        chat_management_layout.addWidget(clear_all_button)
-        chat_management_layout.addStretch()
-        chat_layout.addLayout(chat_management_layout)
-        
-        chat_container.setLayout(chat_layout)
-        splitter.addWidget(chat_container)
-        
-        # Right-side live log panel removed — logs now go to QGIS Log Messages
-        
-        # Set splitter behavior
-        try:
-            splitter.setChildrenCollapsible(False)
-        except Exception:
-            pass
-        
-        layout.addWidget(splitter)
-        
-        # Progress bar
+        foot.addWidget(clear_all_button)
+        foot.addStretch(1)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
-        chat_widget.setLayout(layout)
+        foot.addWidget(self.progress_bar)
+        layout.addLayout(foot)
+
         return chat_widget
     
     # Logs tab removed; live logs are displayed within the Chat tab
@@ -577,7 +588,12 @@ class CopilotChatDialog(QDialog):
         # UI signals
         self.api_provider_combo.currentTextChanged.connect(self.on_api_provider_changed)
         self.model_selection_combo.currentTextChanged.connect(self.on_model_changed)
-        self.chat_display.anchorClicked.connect(self.handle_anchor_click)
+        # Legacy widget-only: in QML mode chat_display is not created
+        try:
+            if hasattr(self, 'chat_display') and self.chat_display is not None:
+                self.chat_display.anchorClicked.connect(self.handle_anchor_click)
+        except Exception:
+            pass
     
     def on_api_provider_changed(self, provider_name):
         """Handle API provider change"""
@@ -968,16 +984,23 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     def send_message(self, message=None, is_programmatic=False):
         """Send a message to QGIS Copilot. Can be called programmatically."""
         if not is_programmatic:
-            message = self.message_input.text().strip()
+            # Legacy path: only used if a QWidget input exists
+            try:
+                if hasattr(self, 'message_input') and self.message_input:
+                    message = self.message_input.text().strip()
+                else:
+                    # No inline input (QML handles composer); ignore empty call
+                    return
+            except Exception:
+                return
             if not message:
                 return
-
-            # Add user message to chat
+            # Add user message to history + external UIs; QML echoes its own user bubble
             self.add_to_chat("You", message, "#007bff")
-
-            # Clear input
-            self.message_input.clear()
-            # Enable Retry so user can resend the last prompt if desired
+            try:
+                self.message_input.clear()
+            except Exception:
+                pass
             try:
                 if hasattr(self, 'retry_button') and self.retry_button:
                     self.retry_button.setEnabled(True)
@@ -1466,6 +1489,63 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     def handle_improvement_suggestion(self, original_code, suggestion_prompt):
         self.add_to_chat("System", "Requesting improvement for the last failed script...", "#6c757d")
         self.send_message(message=suggestion_prompt, is_programmatic=True)
+
+    # ---- QML ChatPanel signal handlers ----
+    def on_qml_copy(self, text: str):
+        try:
+            QGuiApplication.clipboard().setText(text or "")
+        except Exception:
+            pass
+
+    def on_qml_edit(self, text: str):
+        code = text or ""
+        if not code.strip():
+            return
+        try:
+            fenced = f"```python\n{code}\n```"
+            # Use the same helper used elsewhere to save to the task file
+            filename_hint = None
+            try:
+                for item in reversed(self.chat_history):
+                    if item.get('sender') == 'You':
+                        filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                        break
+            except Exception:
+                pass
+            path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=filename_hint, quiet=True)
+            if path and os.path.exists(path):
+                self._open_file_in_python_console_editor(path)
+            else:
+                # Fallback: open an editor dock inside Copilot
+                self.ensure_code_editor_dock(code)
+        except Exception:
+            # Final fallback: just drop a system line in chat
+            self.add_to_chat("System", "Could not open editor for the selected code.", "#6c757d")
+
+    def on_qml_run_code(self, code_text: str):
+        code = (code_text or "").strip()
+        if not code:
+            return
+        try:
+            if hasattr(self, 'run_in_console_cb') and self.run_in_console_cb.isChecked():
+                fenced = f"```python\n{code}\n```"
+                path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint="qml_chat_task", quiet=True)
+                self.pyqgis_executor.execute_task_file(path)
+            else:
+                self.pyqgis_executor.execute_code(code)
+        except Exception:
+            self.pyqgis_executor.execute_code(code)
+
+    def on_qml_run(self, msg: str):
+        try:
+            text = (msg or '').strip()
+            if not text:
+                return
+            # Record to history/UI; QML will visually echo but we keep internal history consistent
+            self.add_to_chat("You", text, "#007bff")
+            self.send_message(text, is_programmatic=True)
+        except Exception:
+            pass
     
     def add_to_chat(self, sender, message, color):
         """Add a message to the chat display and history"""
@@ -1504,7 +1584,12 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
             self._current_render_msg_id = msg_id
         except Exception:
             pass
-        self.render_message(sender, message, color, timestamp)
+        # Render into legacy QTextBrowser if present; QML chat is updated via signal below
+        try:
+            if hasattr(self, 'chat_display') and self.chat_display is not None:
+                self.render_message(sender, message, color, timestamp)
+        except Exception:
+            pass
         try:
             del self._current_render_msg_id
         except Exception:
@@ -1519,6 +1604,13 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 role = 'system'
             if hasattr(self, 'chat_message_added') and callable(getattr(self, 'chat_message_added').emit):
                 self.chat_message_added.emit(role, message, iso_ts)
+        except Exception:
+            pass
+
+        # Directly notify embedded QML, if available (belt-and-suspenders)
+        try:
+            if getattr(self, 'qml_root', None) is not None and hasattr(self.qml_root, 'appendMessage'):
+                self.qml_root.appendMessage(role, message, iso_ts)
         except Exception:
             pass
 
@@ -2080,7 +2172,18 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 return
         
         self.chat_history.clear()
-        self.chat_display.clear()
+        # Clear QML chat, if present
+        try:
+            if getattr(self, 'qml_root', None) is not None and hasattr(self.qml_root, 'clearMessages'):
+                self.qml_root.clearMessages()
+        except Exception:
+            pass
+        # Clear legacy QWidget display, if present
+        try:
+            if hasattr(self, 'chat_display') and self.chat_display is not None:
+                self.chat_display.clear()
+        except Exception:
+            pass
         self.last_response = None
         # Standalone Run button removed; nothing to disable here
         # Disable Retry; no failed context anymore
@@ -2222,14 +2325,22 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         """Show progress bar with message"""
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
-        self.send_button.setEnabled(False)
-        self.send_button.setText(message)
+        try:
+            if hasattr(self, 'send_button') and self.send_button:
+                self.send_button.setEnabled(False)
+                self.send_button.setText(message)
+        except Exception:
+            pass
     
     def hide_progress(self):
         """Hide progress bar"""
         self.progress_bar.setVisible(False)
-        self.send_button.setEnabled(True)
-        self.send_button.setText("Send")
+        try:
+            if hasattr(self, 'send_button') and self.send_button:
+                self.send_button.setEnabled(True)
+                self.send_button.setText("Send")
+        except Exception:
+            pass
     
     def closeEvent(self, event):
         """Handle dialog close event"""

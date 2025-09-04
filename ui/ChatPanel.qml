@@ -65,6 +65,11 @@ Rectangle {
         chatView.positionViewAtIndex(chatModel.count-1, ListView.End)
     }
 
+    // Clear all chat messages (called from Python)
+    function clearMessages() {
+        chatModel.clear();
+    }
+
     // ---- Markdown block parser (text vs fenced code) ----
     function parseBlocks(src) {
         var s = src || "";

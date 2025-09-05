@@ -36,7 +36,7 @@ class OpenAIAPI(QObject):
             else:
                 # 2) Fall back to bundled agents folder (v3.5, then v3.4)
                 for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
-                    candidate = os.path.join(plugin_root, "agents", fname)
+                    candidate = os.path.join(plugin_root, "ai", "agents", fname)
                     if os.path.exists(candidate):
                         with open(candidate, "r", encoding="utf-8") as f:
                             self.system_prompt = f.read()

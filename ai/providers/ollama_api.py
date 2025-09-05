@@ -42,7 +42,7 @@ class OllamaAPI(QObject):
             else:
                 loaded = False
                 for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
-                    prompt_path = os.path.join(plugin_root, "agents", fname)
+                    prompt_path = os.path.join(plugin_root, "ai", "agents", fname)
                     if os.path.exists(prompt_path):
                         with open(prompt_path, "r", encoding="utf-8") as f:
                             self.system_prompt = f.read()

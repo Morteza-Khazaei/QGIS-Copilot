@@ -243,7 +243,7 @@ qgis_copilot/
 │       └── pyqgis_api_validator.py       # Live API signatures helper
 ├── 🧪 ai/utils/diagnostics.py             # Optional Ollama connectivity diagnostic
 ├── ⚡ pyqgis_executor.py                  # Code execution engine
-├── 📁 agents/                             # Agent prompts (qgis_agent_v3.5.md, qgis_agent_v3.4.md)
+├── 📦 ai/agents/                          # Agent prompts (qgis_agent_v3.5.md, qgis_agent_v3.4.md)
 ├── 📋 metadata.txt                        # Plugin metadata
 ├── 🖼️ figures/                            # UI assets (icons/images)
 ├── 🗂️ ui/                                 # QML: ChatPanel.qml

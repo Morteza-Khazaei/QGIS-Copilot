@@ -1,15 +1,15 @@
 [general]
 name=QGIS Copilot
 qgisMinimumVersion=3.0
-description=Your intelligent QGIS assistant powered by generative AI
+description=The intelligent QGIS assistant powered by generative AI
 version=1.0.0
-author=QGIS Community
-email=community@qgis.org
+author=Morteza Khazaei
+email=morteza.khazaei@uhserbrooke.ca
 about=QGIS Copilot is an intelligent assistant that helps you work with QGIS through natural language. Ask questions, get code solutions, and execute GIS operations effortlessly using the power of generative AI (Gemini, ChatGPT, Claude) and the PyQGIS API. Perfect for both beginners learning QGIS and experts who want to speed up their workflow.
-tracker=https://github.com/yourusername/qgis-copilot/issues
-repository=https://github.com/yourusername/qgis-copilot
+tracker=https://github.com/Morteza-Khazaei/qgis-copilot/issues
+repository=https://github.com/Morteza-Khazaei/qgis-copilot
 tags=python,ai,gemini,pyqgis,assistant,copilot,chat,nlp,gis,automation
-homepage=https://github.com/yourusername/qgis-copilot
+homepage=https://github.com/Morteza-Khazaei/qgis-copilot
 category=Plugins
 icon=figures/copilot.png
 experimental=False

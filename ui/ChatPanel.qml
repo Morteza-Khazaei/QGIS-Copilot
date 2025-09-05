@@ -51,7 +51,7 @@ Rectangle {
     ListModel { id: chatModel }
 
     // ---- Methods callable from Python (QMetaObject.invokeMethod) ----
-    function appendMessage(role, text, ts) {
+    function appendMessage(role, text, ts, sender) {
         // role: "user" | "assistant" | "qgis" | "system"
         var r = role || "assistant"
         var t = text || ""
@@ -63,7 +63,10 @@ Rectangle {
                 return
             }
         }
-        chatModel.append({ role: r, text: t, ts: iso })
+        // Per-message sender label (pin model name used at time of reply)
+        var s = sender || ""
+        // Append
+        chatModel.append({ role: r, text: t, ts: iso, sender: s })
         // Protect memory: prune oldest beyond a soft cap
         var cap = 400
         if (chatModel.count > cap) {
@@ -174,7 +177,7 @@ Rectangle {
                 }
 
                 Label {
-                    text: roleToName[roleNorm] || "Participant"
+                    text: (typeof sender !== 'undefined' && sender.length ? sender : (roleToName[roleNorm] || "Participant"))
                     font.pixelSize: 12
                     font.bold: true
                     color: "#3a3a3a"

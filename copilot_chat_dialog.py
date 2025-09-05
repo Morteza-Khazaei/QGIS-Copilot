@@ -257,11 +257,23 @@ class CopilotChatDialog(QDialog):
                     self.chat_message_added.disconnect()
                 except Exception:
                     pass
-                self.chat_message_added.connect(lambda role, text, ts: self.qml_root.appendMessage(role, text, ts))
+                self.chat_message_added.connect(
+                    lambda role, text, ts: self.qml_root.appendMessage(
+                        role,
+                        text,
+                        ts,
+                        (str(getattr(self.current_api, 'model', '')) if role == 'assistant' else '')
+                    )
+                )
             except Exception:
                 pass
 
             layout.addWidget(qml_container)
+            # Ensure provider/model labels are in sync
+            try:
+                self._update_qml_ai_labels()
+            except Exception:
+                pass
         else:
             # Fallback simple chat display
             fb = QWidget()
@@ -630,6 +642,10 @@ class CopilotChatDialog(QDialog):
             pass
         self.update_api_settings_ui()
         self.load_current_api_key()
+        try:
+            self._update_qml_ai_labels()
+        except Exception:
+            pass
 
     def on_auto_feedback_toggled(self, checked):
         """Handle toggling of auto-feedback checkbox"""
@@ -642,6 +658,10 @@ class CopilotChatDialog(QDialog):
 
         if hasattr(self.current_api, 'set_model'):
             self.current_api.set_model(model_name)
+        try:
+            self._update_qml_ai_labels()
+        except Exception:
+            pass
 
     def handle_anchor_click(self, url):
         """Handle clicks on links in the chat display."""
@@ -1264,30 +1284,32 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     def log_provider_and_config(self):
         """Write a one-shot snapshot of provider and key configuration to Live Logs."""
         try:
-            self.add_to_execution_results("=== QGIS Copilot Request ===")
-            self.add_to_execution_results(f"Provider: {self.current_api_name}")
-            # Model if available
+            lines = []
+            lines.append("=== QGIS Copilot Request ===")
+            # Provider and model
+            try:
+                lines.append(f"Provider: {self.current_api_name}")
+            except Exception:
+                pass
             try:
                 model = getattr(self.current_api, 'model', None)
                 if model:
-                    self.add_to_execution_results(f"Model: {model}")
+                    lines.append(f"Model: {model}")
             except Exception:
                 pass
             # Provider-specific endpoint
             try:
                 if self.current_api_name == "Ollama (Local)" and hasattr(self.ollama_api, 'get_base_url'):
-                    self.add_to_execution_results(f"Base URL: {self.ollama_api.get_base_url()}")
+                    lines.append(f"Base URL: {self.ollama_api.get_base_url()}")
             except Exception:
                 pass
-
             # Prompt source
             try:
                 prompt_file = QSettings().value("qgis_copilot/system_prompt_file", type=str)
                 if prompt_file:
-                    self.add_to_execution_results(f"Prompt File: {prompt_file}")
+                    lines.append(f"Prompt File: {prompt_file}")
             except Exception:
                 pass
-
             # Preferences
             try:
                 prefs = []
@@ -1296,19 +1318,21 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 prefs.append(f"Auto Execute: {self.auto_execute_cb.isChecked()}")
                 prefs.append(f"Auto Feedback: {self.auto_feedback_cb.isChecked()}")
                 prefs.append(f"Run in Console: {self.run_in_console_cb.isChecked()}")
-                self.add_to_execution_results("Preferences: " + ", ".join(prefs))
+                lines.append("Preferences: " + ", ".join(prefs))
             except Exception:
                 pass
-
             # Workspace directory
             try:
                 ws = QSettings().value("qgis_copilot/workspace_dir", type=str)
                 if not ws:
                     plugin_root = os.path.dirname(__file__)
                     ws = os.path.join(plugin_root, "workspace")
-                self.add_to_execution_results(f"Workspace: {ws}")
+                lines.append(f"Workspace: {ws}")
             except Exception:
                 pass
+
+            # Emit a single consolidated message
+            self.add_to_execution_results("\n".join(lines))
         except Exception:
             pass
 
@@ -1354,7 +1378,12 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.hide_progress()
         
         # Add response to chat
-        self.add_to_chat(self.current_api_name, response, "#28a745")
+        try:
+            model = getattr(self.current_api, 'model', None)
+            ai_label = str(model) if model else self.current_api_name
+        except Exception:
+            ai_label = self.current_api_name
+        self.add_to_chat(ai_label, response, "#28a745")
         
         # Store last response for potential execution
         self.last_response = response
@@ -2441,6 +2470,25 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     def request_manual_improvement(self):
         """Manually trigger a request for AI to improve the last failed code."""
         self.request_ai_improvement()
+
+    def _update_qml_ai_labels(self):
+        """Update provider/model labels shown in the embedded QML chat header."""
+        try:
+            root = getattr(self, 'qml_root', None)
+            if root is None:
+                return
+            prov = getattr(self, 'current_api_name', '') or ''
+            model = ''
+            try:
+                m = getattr(self.current_api, 'model', None)
+                if m:
+                    model = str(m)
+            except Exception:
+                model = ''
+            root.setProperty('aiProviderName', prov)
+            root.setProperty('aiModelName', model or prov)
+        except Exception:
+            pass
 
     def on_retry_clicked(self):
         """Retry behavior: if a failed run exists, request improvement; otherwise resend last user query."""

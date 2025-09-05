@@ -44,6 +44,7 @@ Rectangle {
     signal runRequested(string text)
     signal runCodeRequested(string code)
     signal debugRequested(string info)
+    signal clearRequested()          // ask host to clear chat/logs
 
     // ---- Model the dock calls into via root.appendMessage(role, text, ts) ----
     ListModel { id: chatModel }
@@ -376,10 +377,10 @@ Rectangle {
         color: "transparent" // remove background strip
         border.width: 0
 
-        RowLayout {
-            anchors.fill: parent
-            anchors.margins: 10
-            spacing: 8
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 10
+                spacing: 8
 
             TextArea {
                 id: input
@@ -446,6 +447,40 @@ Rectangle {
                     // Forward to Python bridge
                     root.runRequested(msg);
                     input.text = "";
+                }
+            }
+
+            // Clear-all icon button (appears after Send)
+            Button {
+                id: clearBtn
+                text: "\ud83e\uddf9"   // broom emoji
+                Accessible.name: "Clear chat"
+                hoverEnabled: true
+                implicitWidth: 36
+                implicitHeight: 36
+                enabled: chatModel.count > 0
+                opacity: enabled ? 1.0 : 0.45
+                ToolTip.visible: clearBtn.hovered
+                ToolTip.text: "Clear chat"
+                background: Rectangle {
+                    radius: 18
+                    color: !clearBtn.enabled ? "#f0f0f0" : (clearBtn.pressed ? "#e0e0e0" : (clearBtn.hovered ? "#ececec" : "#f5f5f5"))
+                    border.width: 1
+                    border.color: !clearBtn.enabled ? "#e0e0e0" : "#d0d0d0"
+                }
+                contentItem: Text {
+                    text: clearBtn.text
+                    color: clearBtn.enabled ? "#333333" : "#9a9a9a"
+                    font.pixelSize: 16
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                onClicked: {
+                    if (!clearBtn.enabled) return;
+                    // Clear locally for instant feedback
+                    chatModel.clear();
+                    // Ask host (Python) to clear history/logs as well
+                    root.clearRequested();
                 }
             }
         }

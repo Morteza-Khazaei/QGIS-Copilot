@@ -229,6 +229,8 @@ class CopilotChatDialog(QDialog):
                 self.qml_root.runRequested.connect(self.on_qml_run)
                 if hasattr(self.qml_root, 'runCodeRequested'):
                     self.qml_root.runCodeRequested.connect(self.on_qml_run_code)
+                if hasattr(self.qml_root, 'clearRequested'):
+                    self.qml_root.clearRequested.connect(self.clear_all)
             except Exception:
                 pass
 
@@ -257,12 +259,8 @@ class CopilotChatDialog(QDialog):
             fb_l.addWidget(self.chat_display)
             layout.addWidget(fb)
 
-        # Footer row: Clear All + progress bar
+        # Footer row: progress bar only (Clear is now in QML as an icon)
         foot = QHBoxLayout()
-        clear_all_button = QPushButton("Clear All")
-        clear_all_button.setToolTip("Clear chat history and live logs")
-        clear_all_button.clicked.connect(self.clear_all)
-        foot.addWidget(clear_all_button)
         foot.addStretch(1)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -2274,20 +2272,24 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         try:
             if message is None:
                 return
-            import html as _html
-            # Normalize: strip leading newlines so the top of the gray box isn't blank
-            text = str(message)
-            text = text.lstrip("\n")
-            esc = _html.escape(text)
+            text = str(message).lstrip("\n")
 
+            # If QML chat is active, post logs as a system message with a fenced code block
+            if getattr(self, 'qml_root', None) is not None and hasattr(self.qml_root, 'appendMessage'):
+                md = f"```\n{text}\n```"
+                # Use add_to_chat so history stays consistent; this also emits to QML
+                self.add_to_chat("System", md, "#6c757d")
+                return
+
+            # Legacy QTextBrowser rendering
+            import html as _html
+            esc = _html.escape(text)
             cursor = self.chat_display.textCursor()
             cursor.movePosition(QTextCursor.End)
             try:
                 cursor.insertBlock()
             except Exception:
                 pass
-            # Ensure spacing from prior content
-            # One clear empty line before the log block
             cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
             ts = datetime.now().strftime("%H:%M:%S")
             container = (
@@ -2307,7 +2309,6 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 "</div>"
             )
             cursor.insertHtml(container)
-            # Add bottom spacer so sequential logs don't appear joined
             try:
                 cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
             except Exception:

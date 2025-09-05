@@ -1,5 +1,5 @@
 """
-OpenAI API Integration for QGIS Copilot
+Anthropic Claude API Integration for QGIS Copilot
 """
 
 import json
@@ -8,32 +8,34 @@ from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
 from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
-class OpenAIAPI(QObject):
-    """Handle OpenAI API communication"""
+class ClaudeAPI(QObject):
+    """Handle Anthropic Claude API communication"""
 
     response_received = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
 
-    AVAILABLE_MODELS = ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+    AVAILABLE_MODELS = [
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307"
+    ]
 
     def __init__(self):
         super().__init__()
         self.settings = QSettings()
-        self.api_key = self.settings.value("qgis_copilot/openai_api_key", "")
-        self.model = self.settings.value("qgis_copilot/openai_model", self.AVAILABLE_MODELS[0])
-        self.base_url = "https://api.openai.com/v1"
+        self.api_key = self.settings.value("qgis_copilot/claude_api_key", "")
+        self.model = self.settings.value("qgis_copilot/claude_model", self.AVAILABLE_MODELS[1])  # Sonnet as default
+        self.base_url = "https://api.anthropic.com/v1"
 
         # Load system prompt from settings path or bundled agents/ folder
         try:
             import os
-            plugin_root = os.path.dirname(__file__)
-            # 1) Prefer an explicit path saved by the UI
+            plugin_root = os.path.dirname(os.path.dirname(__file__))
             path = self.settings.value("qgis_copilot/system_prompt_file", type=str)
             if path and os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     self.system_prompt = f.read()
             else:
-                # 2) Fall back to bundled agents folder (v3.5, then v3.4)
                 for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
                     candidate = os.path.join(plugin_root, "agents", fname)
                     if os.path.exists(candidate):
@@ -194,30 +196,31 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
 """
 
     def set_api_key(self, api_key):
-        """Set and save the OpenAI API key"""
+        """Set and save the Claude API key"""
         self.api_key = api_key
-        self.settings.setValue("qgis_copilot/openai_api_key", api_key)
+        self.settings.setValue("qgis_copilot/claude_api_key", api_key)
 
     def set_model(self, model_name):
-        """Set and save the OpenAI model"""
+        """Set and save the Claude model"""
         if model_name in self.AVAILABLE_MODELS:
             self.model = model_name
-            self.settings.setValue("qgis_copilot/openai_model", model_name)
+            self.settings.setValue("qgis_copilot/claude_model", model_name)
 
     def get_api_key(self):
         """Get the stored API key"""
-        return self.settings.value("qgis_copilot/openai_api_key", "")
+        return self.settings.value("qgis_copilot/claude_api_key", "")
 
     def send_message(self, message, context=None):
-        """Send a message to OpenAI API with QGIS context"""
+        """Send a message to Claude API with QGIS context"""
         if not self.api_key:
-            self.error_occurred.emit("No OpenAI API key configured")
+            self.error_occurred.emit("No Claude API key configured")
             return
 
-        url = f"{self.base_url}/chat/completions"
+        url = f"{self.base_url}/messages"
         headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
         }
 
         user_content = message
@@ -226,12 +229,11 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
 
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "temperature": 0.7,
             "max_tokens": 2048,
+            "system": self.system_prompt,
+            "messages": [
+                {"role": "user", "content": user_content}
+            ]
         }
 
         try:
@@ -239,9 +241,11 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
 
             if response.status_code == 200:
                 data = response.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"]["content"]
-                    self.response_received.emit(content.strip())
+                if "content" in data and len(data["content"]) > 0:
+                    text_content = "".join(
+                        block.get("text", "") for block in data["content"] if block.get("type") == "text"
+                    )
+                    self.response_received.emit(text_content.strip())
                 else:
                     self.error_occurred.emit(f"No response generated. Payload: {data}")
             else:
@@ -297,9 +301,5 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
             return "\n".join(context_info)
 
         except Exception as e:
-            QgsMessageLog.logMessage(
-                f"Error getting context: {str(e)}",
-                "QGIS Copilot",
-                level=Qgis.Warning
-            )
+            QgsMessageLog.logMessage(f"Error getting context: {str(e)}", "QGIS Copilot", level=Qgis.Warning)
             return "Context information unavailable"

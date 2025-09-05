@@ -17,12 +17,12 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtGui import QTextCursor, QCursor, QDesktopServices, QFont, QTextDocument, QGuiApplication
 from qgis.core import QgsMessageLog, Qgis, QgsApplication
 
-from .gemini_api import GeminiAPI
-from .openai_api import OpenAIAPI
-from .claude_api import ClaudeAPI
-from .ollama_api import OllamaAPI
+from .ai.providers.gemini_api import GeminiAPI
+from .ai.providers.openai_api import OpenAIAPI
+from .ai.providers.claude_api import ClaudeAPI
+from .ai.providers.ollama_api import OllamaAPI
 from .pyqgis_executor import EnhancedPyQGISExecutor
-from .pyqgis_api_validator import PyQGISAPIValidator
+from .ai.utils.pyqgis_api_validator import PyQGISAPIValidator
 
 
 class CopilotChatDialog(QDialog):

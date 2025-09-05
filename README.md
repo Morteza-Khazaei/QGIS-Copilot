@@ -190,7 +190,7 @@ Here are some things you can ask your QGIS Copilot:
   - Chat: `curl http://localhost:11434/api/chat -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Connection test successful!"}]}'`
 
 For an in‑QGIS diagnostic:
-- `from QGIS_Copilot.ollama_connectivity_diagnostic import run_diagnostic`
+- `from QGIS_Copilot.ai.utils.diagnostics import run_diagnostic`
 - `run_diagnostic()`
 
 ---
@@ -233,11 +233,15 @@ qgis_copilot/
 ├── 📄 __init__.py                         # Plugin initialization
 ├── 🧠 copilot_plugin.py                   # Main plugin class
 ├── 💬 copilot_chat_dialog.py              # Main UI (AI tab, integrated QML chat)
-├── 🌐 gemini_api.py                       # Google Gemini integration
-├── 🌐 openai_api.py                       # OpenAI ChatGPT integration
-├── 🌐 claude_api.py                       # Anthropic Claude integration
-├── 🖥️ ollama_api.py                       # Ollama (Local) integration
-├── 🧪 ollama_connectivity_diagnostic.py   # Optional diagnostic helper
+├── 📦 ai/
+│   ├── providers/
+│   │   ├── gemini_api.py                 # Google Gemini integration
+│   │   ├── openai_api.py                 # OpenAI ChatGPT integration
+│   │   ├── claude_api.py                 # Anthropic Claude integration
+│   │   └── ollama_api.py                 # Ollama (Local) integration
+│   └── utils/
+│       └── pyqgis_api_validator.py       # Live API signatures helper
+├── 🧪 ai/utils/diagnostics.py             # Optional Ollama connectivity diagnostic
 ├── ⚡ pyqgis_executor.py                  # Code execution engine
 ├── 📁 agents/                             # Agent prompts (qgis_agent_v3.5.md, qgis_agent_v3.4.md)
 ├── 📋 metadata.txt                        # Plugin metadata

@@ -31,7 +31,7 @@ class GeminiAPI(QObject):
         # Load system prompt from settings path or bundled agents/ folder
         try:
             import os
-            plugin_root = os.path.dirname(__file__)
+            plugin_root = os.path.dirname(os.path.dirname(__file__))
             path = self.settings.value("qgis_copilot/system_prompt_file", type=str)
             if path and os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:

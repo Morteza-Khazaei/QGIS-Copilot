@@ -123,7 +123,7 @@ def run_diagnostic():
 
     # Optional: try via plugin API if available
     try:
-        from .ollama_api import OllamaAPI
+        from ..providers.ollama_api import OllamaAPI
 
         _log("Trying plugin OllamaAPI.test_model() …")
         api = OllamaAPI()
@@ -144,4 +144,3 @@ def run_diagnostic():
         _log(f"Plugin API test skipped: {e}", Qgis.Warning)
 
     return False
-

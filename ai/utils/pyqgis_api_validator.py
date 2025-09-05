@@ -226,4 +226,3 @@ class PyQGISAPIValidator:
             if k in task_lower:
                 relevant.update(classes)
         return [c for c in relevant if c in self.api_cache]
-

@@ -26,7 +26,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant, QSettings
-from .pyqgis_api_validator import PyQGISAPIValidator
+from .ai.utils.pyqgis_api_validator import PyQGISAPIValidator
 
 
 class ExecutionLog:

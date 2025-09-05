@@ -247,16 +247,70 @@ Rectangle {
                                 property var entry: modelData
 
                                 // Text block (Markdown for assistant; plain for others)
-                                Text {
-                                    id: blkText
+                                Item {
+                                    id: blkWrap
                                     visible: entry.kind === 'text'
-                                    text: entry.body
-                                    textFormat: isAssistant ? Text.MarkdownText : Text.PlainText
-                                    color: bubbleText
-                                    wrapMode: Text.WrapAnywhere
                                     width: parent.width
-                                    font.pixelSize: 14
-                                    onLinkActivated: function(url) { root.debugRequested("link:" + url) }
+                                    height: blkText.implicitHeight
+
+                                    // Hover area to reveal Copy action (since Text isn't selectable)
+                                    MouseArea { id: blkHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                                    // Hotspot for text actions (top-right of text block)
+                                    MouseArea {
+                                        id: textActionsHot
+                                        anchors.top: parent.top
+                                        anchors.right: parent.right
+                                        anchors.topMargin: 4
+                                        anchors.rightMargin: 6
+                                        width: 80
+                                        height: 24
+                                        hoverEnabled: true
+                                        acceptedButtons: Qt.NoButton
+                                    }
+
+                                    Item {
+                                        id: textActions
+                                        anchors.top: parent.top
+                                        anchors.right: parent.right
+                                        anchors.topMargin: 4
+                                        anchors.rightMargin: 6
+                                        height: 24
+                                        width: textBtnRow.implicitWidth
+                                        z: 10
+                                        visible: textActionsHot.containsMouse || textActionsHover.containsMouse
+
+                                        MouseArea {
+                                            id: textActionsHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
+                                        }
+                                        Row {
+                                            id: textBtnRow
+                                            spacing: 4
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Button {
+                                                text: "Copy"
+                                                padding: 4
+                                                font.pixelSize: 10
+                                                implicitHeight: 22
+                                                implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                                onClicked: root.copyRequested(entry.body)
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        id: blkText
+                                        text: entry.body
+                                        textFormat: isAssistant ? Text.MarkdownText : Text.PlainText
+                                        color: bubbleText
+                                        wrapMode: Text.WrapAnywhere
+                                        width: parent.width
+                                        font.pixelSize: 14
+                                        onLinkActivated: function(url) { root.debugRequested("link:" + url) }
+                                    }
                                 }
 
                                 // Code block with per-block actions (assistant only)
@@ -272,53 +326,82 @@ Rectangle {
 
                                     // Hover-only actions header
                                     MouseArea { id: codeHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
-                                    Row {
-                                        spacing: 4
+                                    // Hotspot in top-right to reveal actions only when cursor is exactly there
+                                    MouseArea {
+                                        id: codeActionsHot
                                         anchors.top: parent.top
                                         anchors.right: parent.right
                                         anchors.topMargin: 4
                                         anchors.rightMargin: 6
-                                        // Show on hover for both assistant (code actions)
-                                        // and system/QGIS logs (debug action)
-                                        visible: codeHover.containsMouse
+                                        width: 120
+                                        height: 24
+                                        hoverEnabled: true
+                                        acceptedButtons: Qt.NoButton
+                                    }
 
-                                        // Assistant actions
-                                        Button {
-                                            text: "Copy"
-                                            padding: 4
-                                            font.pixelSize: 10
-                                            implicitHeight: 22
-                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                                            visible: isAssistant
-                                            onClicked: root.copyRequested(entry.body)
+                                    // Fixed-position overlay container keeps actions inside bubble and steady
+                                    Item {
+                                        id: codeActions
+                                        anchors.top: parent.top
+                                        anchors.right: parent.right
+                                        anchors.topMargin: 4
+                                        anchors.rightMargin: 6
+                                        height: 24
+                                        width: btnRow.implicitWidth
+                                        z: 10
+                                        visible: codeActionsHot.containsMouse || actionsHover.containsMouse
+
+                                        // Hover catcher to make hover sticky without stealing clicks
+                                        MouseArea {
+                                            id: actionsHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
                                         }
-                                        Button {
-                                            text: "Edit"
-                                            padding: 4
-                                            font.pixelSize: 10
-                                            implicitHeight: 22
-                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                                            visible: isAssistant
-                                            onClicked: root.editRequested(entry.body)
-                                        }
-                                        Button {
-                                            text: "Run"
-                                            padding: 4
-                                            font.pixelSize: 10
-                                            implicitHeight: 22
-                                            implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
-                                            visible: isAssistant
-                                            onClicked: root.runCodeRequested(entry.body)
-                                        }
-                                        // System/QGIS logs: Debug action
-                                        Button {
-                                            text: "Debug"
-                                            padding: 4
-                                            font.pixelSize: 10
-                                            implicitHeight: 22
-                                            implicitWidth: 56
-                                            visible: (isQgis || roleNorm === 'system') && isErrorLog(messageText)
-                                            onClicked: root.debugRequested(entry.body)
+
+                                        Row {
+                                            id: btnRow
+                                            spacing: 4
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            // Assistant actions
+                                            Button {
+                                                text: "Copy"
+                                                padding: 4
+                                                font.pixelSize: 10
+                                                implicitHeight: 22
+                                                implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                                visible: isAssistant
+                                                onClicked: root.copyRequested(entry.body)
+                                            }
+                                            Button {
+                                                text: "Edit"
+                                                padding: 4
+                                                font.pixelSize: 10
+                                                implicitHeight: 22
+                                                implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                                visible: isAssistant
+                                                onClicked: root.editRequested(entry.body)
+                                            }
+                                            Button {
+                                                text: "Run"
+                                                padding: 4
+                                                font.pixelSize: 10
+                                                implicitHeight: 22
+                                                implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                                visible: isAssistant
+                                                onClicked: root.runCodeRequested(entry.body)
+                                            }
+                                            // System/QGIS logs: Debug action
+                                            Button {
+                                                text: "Debug"
+                                                padding: 4
+                                                font.pixelSize: 10
+                                                implicitHeight: 22
+                                                implicitWidth: 56
+                                                visible: (isQgis || roleNorm === 'system') && isErrorLog(messageText)
+                                                onClicked: root.debugRequested(entry.body)
+                                            }
                                         }
                                     }
 

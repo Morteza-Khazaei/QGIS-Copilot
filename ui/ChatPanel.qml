@@ -6,7 +6,7 @@ Rectangle {
     id: root
     width: 920
     height: 640
-    color: "#f6f7fb"            // light chat background
+    color: "#ffffff"            // match QGIS app background (white)
 
     // ---- Properties set by qml_chat_dock.py ----
     // Example: file:///.../plugins/QGIS-Copilot/figures
@@ -29,10 +29,11 @@ Rectangle {
         "system": "QGIS"   // rename system messages from PyQGIS to QGIS
     })
     readonly property var roleToBubble: ({
-        "user":    "#e7f3ff",   // light blue
-        "assistant": "#fff1e6", // light peach
-        "qgis":    "#eaf7ea",   // light green
-        "system":  "#eef0f3"    // neutral light gray
+        // Softer, more modern pastels for better visual identity
+        "user":     "#eef2ff",   // airy lavender‑blue
+        "assistant": "#fff0f6",  // blush pink
+        "qgis":     "#e9fbf2",   // mint green
+        "system":   "#f4f6fa"    // cool light gray
     })
     readonly property color bubbleText:  "#1a1a1a"
     readonly property color faintText:   "#6e6e6e"
@@ -88,37 +89,12 @@ Rectangle {
         return out;
     }
 
-    // ---- Header ----
-    Rectangle {
-        id: header
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 56
-        color: "#ffffff"
-        border.color: divider
-        border.width: 1
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.margins: 12
-            spacing: 12
-
-            Label {
-                text: "QGIS Copilot"
-                font.pixelSize: 18
-                font.bold: true
-                color: "#2a2a2a"
-                Layout.alignment: Qt.AlignVCenter
-                Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-            }
-        }
-    }
+    // Header removed to maximize chat space
 
     // ---- Chat list ----
     ListView {
         id: chatView
-        anchors.top: header.bottom
+        anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         // Let chat extend behind the composer to use more space

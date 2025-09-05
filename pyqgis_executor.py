@@ -26,7 +26,12 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant, QSettings
+import json
 from .ai.utils.pyqgis_api_validator import PyQGISAPIValidator
+from .copilot.guards.preflight import validate as manifest_preflight_validate
+from .copilot.manifest.qgis_oracle import load_manifest
+from .copilot.guards.runtime import safe_call as _safe_call
+from .copilot.renderer.layout_renderer import render_layout as _render_layout
 
 
 class ExecutionLog:
@@ -139,6 +144,8 @@ class EnhancedPyQGISExecutor(QObject):
             'sum': sum,
             'abs': abs,
             'round': round,
+            # Guarded call helper
+            'safe_call': _safe_call,
         }
         
         # Import commonly used QGIS modules
@@ -174,6 +181,32 @@ class EnhancedPyQGISExecutor(QObject):
                                ['iface', 'project', 'layer', 'canvas', 'Qgs', '=', 'def', 'import'])]
         
         return code_blocks
+
+    def _extract_json_spec_from_response(self, text):
+        """Attempt to extract a JSON layout/spec from the response."""
+        try:
+            # Prefer fenced json blocks
+            fence = r"```|~~~"
+            json_pat = rf'(?:{fence})(?:json|layout_spec)?[ \t]*\r?\n([\s\S]*?)\r?\n?(?:{fence})'
+            blocks = re.findall(json_pat, text, re.DOTALL)
+            for b in blocks:
+                b2 = b.strip()
+                if b2.startswith('{') and b2.endswith('}'):
+                    try:
+                        return json.loads(b2)
+                    except Exception:
+                        continue
+            # Whole message as JSON
+            t = (text or '').strip()
+            if t.startswith('{') and t.endswith('}'):
+                return json.loads(t)
+        except Exception:
+            pass
+        return None
+
+    def render_layout_spec(self, spec: dict):
+        """Public entry to render a layout spec via the trusted renderer."""
+        return _render_layout(spec)
     
     def is_safe_code(self, code):
         """Check if code is safe to execute (supports relaxed mode)."""
@@ -230,6 +263,48 @@ class EnhancedPyQGISExecutor(QObject):
         original_code = code
         # Pre-process QGIS imports consistently
         code = self._clean_qgis_imports(code)
+
+        # Manifest-based preflight validation with header/type enforcement
+        try:
+            header = self._extract_header_json(code)
+        except Exception:
+            header = None
+        try:
+            errs, tips, types = manifest_preflight_validate(code)
+        except Exception:
+            errs, tips, types = [], [], {}
+        if not header and not types:
+            msg = (
+                "Execution blocked: missing agent header JSON and type hints. "
+                "Provide a header with 'vars' and 'symbols_planned' or add type hints like 'x: QgsClass = QgsClass()'."
+            )
+            execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(msg, False, execution_log)
+            return
+        if header and isinstance(header, dict) and header.get('symbols_planned'):
+            try:
+                man = load_manifest()
+                _, all_methods = self._index_manifest(man)
+                missing = [s for s in header['symbols_planned'] if s not in all_methods]
+                if missing:
+                    msg = "Blocked: unknown symbols in header — " + ", ".join(missing)
+                    execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
+                    self.add_to_history(execution_log)
+                    self.execution_completed.emit(msg, False, execution_log)
+                    return
+            except Exception:
+                pass
+        if errs:
+            suggestions = []
+            for (var, cls, attr), close in zip(errs, tips):
+                hint = f" Did you mean: {', '.join(close)}" if close else ""
+                suggestions.append(f"{cls}.{attr} on '{var}' not found.{hint}")
+            msg = "Execution blocked by manifest preflight.\n" + "\n".join(suggestions)
+            execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(msg, False, execution_log)
+            return
 
         # Run API validation and optionally gate execution (Strict Mode)
         try:
@@ -408,6 +483,47 @@ class EnhancedPyQGISExecutor(QObject):
                 continue
             cleaned_lines.append(line)
         return '\n'.join(cleaned_lines)
+
+    def _extract_header_json(self, code: str):
+        """Extract a leading JSON header embedded as commented lines.
+
+        Example header:
+        # {
+        #   "vars": {"color_shader": "QgsColorRampShader"},
+        #   "symbols_planned": ["QgsColorRampShader.setSourceColorRamp"]
+        # }
+        """
+        try:
+            lines = code.splitlines()
+        except Exception:
+            return None
+        header_lines = []
+        started = False
+        for line in lines[:50]:
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                started = True
+                header_lines.append(stripped.lstrip('#').strip())
+            else:
+                if started:
+                    break
+        text = "\n".join(header_lines).strip()
+        if not text.startswith('{') or not text.endswith('}'):
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
+    def _index_manifest(self, man: dict):
+        classes, methods = set(), set()
+        for _mod, items in man.get('modules', {}).items():
+            for cls, entry in items.items():
+                if entry.get('kind') == 'class':
+                    classes.add(cls)
+                    for a in (entry.get('attrs') or {}).keys():
+                        methods.add(f"{cls}.{a}")
+        return classes, methods
 
     def _static_validate_code(self, code: str):
         """Lightweight static checks using live PyQGIS API via introspection.

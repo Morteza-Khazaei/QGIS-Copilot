@@ -1472,13 +1472,27 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.add_to_execution_results("=" * 50)
         self.add_to_execution_results("Executing code from QGIS Copilot response...")
         self.add_to_execution_results("=" * 50)
+        # Prefer DSL: if a JSON layout/spec is present, render it and return
+        try:
+            spec = self.pyqgis_executor._extract_json_spec_from_response(response)
+        except Exception:
+            spec = None
+        if spec is not None:
+            try:
+                result = self.pyqgis_executor.render_layout_spec(spec)
+                msg = f"Rendered DSL layout: {result}"
+                self.add_to_execution_results(msg)
+                return
+            except Exception as e:
+                self.add_to_execution_results(f"DSL rendering failed: {e}")
+                # Fall through to code execution if present
 
         try:
             blocks = self.pyqgis_executor.extract_code_blocks(response) or []
         except Exception:
             blocks = []
         if not blocks:
-            QMessageBox.information(self, 'Run Code', 'No code block found in the response to execute.')
+            QMessageBox.information(self, 'Run Code', 'No code block or layout spec found in the response to execute.')
             return
         for i, code in enumerate(blocks):
             try:

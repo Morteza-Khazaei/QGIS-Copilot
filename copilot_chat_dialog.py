@@ -231,6 +231,8 @@ class CopilotChatDialog(QDialog):
                     self.qml_root.runCodeRequested.connect(self.on_qml_run_code)
                 if hasattr(self.qml_root, 'clearRequested'):
                     self.qml_root.clearRequested.connect(self.clear_all)
+                if hasattr(self.qml_root, 'debugRequested'):
+                    self.qml_root.debugRequested.connect(self.on_qml_debug)
             except Exception:
                 pass
 
@@ -580,6 +582,15 @@ class CopilotChatDialog(QDialog):
         
         # Executor signals
         self.pyqgis_executor.execution_completed.connect(self.handle_execution_completed)
+        # Buffer logs to avoid flooding the chat UI
+        try:
+            self._log_buffer = []
+            self._log_flush_timer = QTimer(self)
+            self._log_flush_timer.setSingleShot(True)
+            self._log_flush_timer.setInterval(250)  # batch within 250ms windows
+            self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        except Exception:
+            pass
         self.pyqgis_executor.logs_updated.connect(self.handle_logs_updated)
         self.pyqgis_executor.improvement_suggested.connect(self.handle_improvement_suggestion)
         
@@ -1463,6 +1474,14 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         status_text = "succeeded" if success else "failed"
         # Do not show separate success/failure bubbles; logs will follow immediately
         pass
+        # Flush any buffered logs immediately
+        try:
+            if hasattr(self, '_log_flush_timer') and self._log_flush_timer:
+                if self._log_flush_timer.isActive():
+                    self._log_flush_timer.stop()
+            self._flush_log_buffer()
+        except Exception:
+            pass
 
         # If execution failed, optionally trigger auto-feedback
         if not success:
@@ -1481,12 +1500,31 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
             # Removed redundant post-success save prompt; script is already saved once per response
 
     def handle_logs_updated(self, formatted_log_entry):
-        """Append new log entry to the live display."""
-        self.add_to_execution_results(formatted_log_entry)
+        """Append new log entry to the live display with batching to reduce UI churn."""
+        try:
+            if not hasattr(self, '_log_buffer'):
+                self._log_buffer = []
+            self._log_buffer.append(formatted_log_entry or "")
+            if hasattr(self, '_log_flush_timer') and self._log_flush_timer:
+                if not self._log_flush_timer.isActive():
+                    self._log_flush_timer.start()
+        except Exception:
+            # Fallback: direct append if buffering unavailable
+            self.add_to_execution_results(formatted_log_entry)
 
     def handle_improvement_suggestion(self, original_code, suggestion_prompt):
         self.add_to_chat("System", "Requesting improvement for the last failed script...", "#6c757d")
         self.send_message(message=suggestion_prompt, is_programmatic=True)
+
+    def _flush_log_buffer(self):
+        try:
+            if not getattr(self, '_log_buffer', None):
+                return
+            chunk = "\n".join(self._log_buffer)
+            self._log_buffer = []
+            self.add_to_execution_results(chunk)
+        except Exception:
+            pass
 
     # ---- QML ChatPanel signal handlers ----
     def on_qml_copy(self, text: str):
@@ -1542,6 +1580,38 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
             # Record to history/UI; QML will visually echo but we keep internal history consistent
             self.add_to_chat("You", text, "#007bff")
             self.send_message(text, is_programmatic=True)
+        except Exception:
+            pass
+
+    def on_qml_debug(self, logs_text: str):
+        """User requested debugging based on QGIS logs from the QML panel."""
+        try:
+            logs = (logs_text or '').strip()
+            # Find the last AI message and extract its code blocks if available
+            last_ai_msg = None
+            for item in reversed(self.chat_history):
+                if item.get('sender') not in ("You", "System"):
+                    last_ai_msg = item
+                    break
+            code_hint = ""
+            try:
+                if last_ai_msg is not None:
+                    mid = last_ai_msg.get('id')
+                    blocks = getattr(self, '_code_blocks_by_msg', {}).get(mid, [])
+                    if blocks:
+                        code_hint = "\n\nCode under test:\n```python\n" + ("\n\n".join(blocks)) + "\n```"
+            except Exception:
+                code_hint = ""
+
+            prompt = (
+                "The previous script failed when executed in QGIS. "
+                "Please analyze the following QGIS logs and explain the cause briefly, "
+                "then provide a corrected, complete Python script."
+                "\n\nQGIS Logs:\n```\n" + logs + "\n```" + code_hint
+            )
+            # Show intent in chat and send programmatically
+            self.add_to_chat("You", "Please debug the last code using these logs.", "#007bff")
+            self.send_message(prompt, is_programmatic=True)
         except Exception:
             pass
     

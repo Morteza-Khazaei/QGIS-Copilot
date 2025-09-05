@@ -64,6 +64,12 @@ Rectangle {
             }
         }
         chatModel.append({ role: r, text: t, ts: iso })
+        // Protect memory: prune oldest beyond a soft cap
+        var cap = 400
+        if (chatModel.count > cap) {
+            var removeCount = chatModel.count - cap
+            chatModel.remove(0, removeCount)
+        }
         chatView.positionViewAtIndex(chatModel.count-1, ListView.End)
     }
 
@@ -127,6 +133,16 @@ Rectangle {
             property bool   isCode: /\x60\x60\x60/.test(messageText) // has ``` somewhere
             property string codeExtract: extractCode(messageText)
             property var    blocks: parseBlocks(messageText)
+            function isErrorLog(txt) {
+                if (!txt) return false;
+                var s = txt.toLowerCase();
+                var hints = [
+                    "traceback", "error:", "exception", "failed", "not found",
+                    "nameerror", "typeerror", "qgsprocessingexception", "valueerror"
+                ];
+                for (var i=0;i<hints.length;i++) { if (s.indexOf(hints[i]) !== -1) return true; }
+                return false;
+            }
 
             // Gutter (avatar + name). Right for user, left otherwise; contents centered.
             Column {
@@ -193,21 +209,10 @@ Rectangle {
                     anchors.right: isUser ? parent.right : undefined
                     anchors.left: !isUser ? parent.left : undefined
 
-                    // Width clamp
-                    // Measure natural (unwrapped) text width, then clamp to rail
+                    // Width clamp: fixed maximum to avoid expensive text measurement
                     property int maxW: Math.floor(parent.width * 0.82)
-                    width: Math.min(measureText.implicitWidth + 24, maxW)
+                    width: Math.min(parent.width, maxW)
                     implicitHeight: contentCol.implicitHeight + 24
-
-                    // Invisible measurer to compute natural content width
-                    Text {
-                        id: measureText
-                        visible: false
-                        text: messageText
-                        textFormat: Text.RichText
-                        wrapMode: Text.NoWrap
-                        font.pixelSize: 14
-                    }
 
                     // Content + footer time inside bubble
                     Column {
@@ -215,6 +220,22 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: 12
                         spacing: 6
+
+                        // QGIS/system reply helper description and actions
+                        Item {
+                            id: sysHelper
+                            visible: isQgis || roleNorm === 'system'
+                            width: parent.width
+                            height: visible ? (desc1.implicitHeight + desc2.implicitHeight + (dbgBtn.visible ? 28 : 0) + 6) : 0
+
+                            Column {
+                                spacing: 2
+                                width: parent.width
+                                Label { id: desc1; text: "QGIS Reply"; color: faintText; font.pixelSize: 12 }
+                                Label { id: desc2; text: "These are logs and messages from executing your script."; color: faintText; font.pixelSize: 11 }
+                                // Debug button moved to code block hover header for consistency
+                            }
+                        }
 
                         // Render message as blocks so code blocks can have per-block actions
                         Repeater {
@@ -257,14 +278,18 @@ Rectangle {
                                         anchors.right: parent.right
                                         anchors.topMargin: 4
                                         anchors.rightMargin: 6
-                                        visible: isAssistant && codeHover.containsMouse
+                                        // Show on hover for both assistant (code actions)
+                                        // and system/QGIS logs (debug action)
+                                        visible: codeHover.containsMouse
 
+                                        // Assistant actions
                                         Button {
                                             text: "Copy"
                                             padding: 4
                                             font.pixelSize: 10
                                             implicitHeight: 22
                                             implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            visible: isAssistant
                                             onClicked: root.copyRequested(entry.body)
                                         }
                                         Button {
@@ -273,6 +298,7 @@ Rectangle {
                                             font.pixelSize: 10
                                             implicitHeight: 22
                                             implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            visible: isAssistant
                                             onClicked: root.editRequested(entry.body)
                                         }
                                         Button {
@@ -281,7 +307,18 @@ Rectangle {
                                             font.pixelSize: 10
                                             implicitHeight: 22
                                             implicitWidth: Math.max(36, contentItem.implicitWidth + 10)
+                                            visible: isAssistant
                                             onClicked: root.runCodeRequested(entry.body)
+                                        }
+                                        // System/QGIS logs: Debug action
+                                        Button {
+                                            text: "Debug"
+                                            padding: 4
+                                            font.pixelSize: 10
+                                            implicitHeight: 22
+                                            implicitWidth: 56
+                                            visible: (isQgis || roleNorm === 'system') && isErrorLog(messageText)
+                                            onClicked: root.debugRequested(entry.body)
                                         }
                                     }
 

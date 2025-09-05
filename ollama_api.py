@@ -31,20 +31,25 @@ class OllamaAPI(QObject):
         # Allow overriding base URL if needed, default local daemon
         self.base_url = self.settings.value("qgis_copilot/ollama_base_url", "http://localhost:11434")
 
-        # Load system prompt from plugin root, prefer v3.5 then v3.4
+        # Load system prompt from settings path or bundled agents/ folder
         try:
             import os
             plugin_root = os.path.dirname(__file__)
-            loaded = False
-            for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
-                prompt_path = os.path.join(plugin_root, fname)
-                if os.path.exists(prompt_path):
-                    with open(prompt_path, "r", encoding="utf-8") as f:
-                        self.system_prompt = f.read()
-                    loaded = True
-                    break
-            if not loaded:
-                raise FileNotFoundError("No agent prompt file found")
+            path = self.settings.value("qgis_copilot/system_prompt_file", type=str)
+            if path and os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    self.system_prompt = f.read()
+            else:
+                loaded = False
+                for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
+                    prompt_path = os.path.join(plugin_root, "agents", fname)
+                    if os.path.exists(prompt_path):
+                        with open(prompt_path, "r", encoding="utf-8") as f:
+                            self.system_prompt = f.read()
+                        loaded = True
+                        break
+                if not loaded:
+                    raise FileNotFoundError("No agent prompt file found in agents folder")
         except Exception:
             # Minimal fallback; do not embed the full agent here
             self.system_prompt = """

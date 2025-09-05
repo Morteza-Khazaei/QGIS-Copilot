@@ -23,13 +23,25 @@ class OpenAIAPI(QObject):
         self.model = self.settings.value("qgis_copilot/openai_model", self.AVAILABLE_MODELS[0])
         self.base_url = "https://api.openai.com/v1"
 
-        # Load system prompt from fixed markdown file in plugin root
+        # Load system prompt from settings path or bundled agents/ folder
         try:
             import os
             plugin_root = os.path.dirname(__file__)
-            prompt_path = os.path.join(plugin_root, "qgis_agent_v3.5.md")
-            with open(prompt_path, "r", encoding="utf-8") as f:
-                self.system_prompt = f.read()
+            # 1) Prefer an explicit path saved by the UI
+            path = self.settings.value("qgis_copilot/system_prompt_file", type=str)
+            if path and os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    self.system_prompt = f.read()
+            else:
+                # 2) Fall back to bundled agents folder (v3.5, then v3.4)
+                for fname in ("qgis_agent_v3.5.md", "qgis_agent_v3.4.md"):
+                    candidate = os.path.join(plugin_root, "agents", fname)
+                    if os.path.exists(candidate):
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            self.system_prompt = f.read()
+                        break
+                else:
+                    raise FileNotFoundError("No agent prompt file found in agents folder")
         except Exception:
             # Fallback to bundled default if file missing
             self.system_prompt = """

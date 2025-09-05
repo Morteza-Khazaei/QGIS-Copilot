@@ -1107,10 +1107,10 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         path = settings.value("qgis_copilot/system_prompt_file", type=str)
         if not path:
             plugin_root = os.path.dirname(__file__)
-            # Default to the root prompt file maintained with the plugin (prefer v3.5)
-            candidate = os.path.join(plugin_root, "qgis_agent_v3.5.md")
+            # Default to agents/ prompt files maintained with the plugin (prefer v3.5)
+            candidate = os.path.join(plugin_root, "agents", "qgis_agent_v3.5.md")
             if not os.path.exists(candidate):
-                candidate = os.path.join(plugin_root, "qgis_agent_v3.4.md")
+                candidate = os.path.join(plugin_root, "agents", "qgis_agent_v3.4.md")
             path = candidate
             settings.setValue("qgis_copilot/system_prompt_file", path)
 
@@ -1320,7 +1320,10 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         except Exception:
             current = ""
         from qgis.PyQt.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(self, "Select System Prompt Markdown", current or os.path.expanduser("~"), "Markdown Files (*.md);;Text Files (*.txt);;All Files (*)")
+        default_dir = os.path.join(os.path.dirname(__file__), "agents")
+        if not current:
+            current = default_dir
+        path, _ = QFileDialog.getOpenFileName(self, "Select System Prompt Markdown", current, "Markdown Files (*.md);;Text Files (*.txt);;All Files (*)")
         if not path:
             return
         settings = QSettings()

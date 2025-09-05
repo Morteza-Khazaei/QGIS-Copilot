@@ -1,7 +1,7 @@
 # QGIS Copilot
 
 <p align="center">
-  <img src="icon.png" alt="QGIS Copilot" width="160" />
+  <img src="figures/copilot.png" alt="QGIS Copilot" width="160" />
 </p>
 
 <div align="center">
@@ -26,14 +26,15 @@
 
 QGIS Copilot is your intelligent GIS assistant that transforms how you work with QGIS. Instead of remembering complex PyQGIS syntax or searching through documentation, just ask your Copilot in plain English!
 
-### ✨ Key Features
+### ✨ Key Features (Current)
 
 - **🗣️ Natural Language Interface**: Ask questions like "Create a 500m buffer around selected features"
 - **🧠 Context Aware**: Understands your current project, layers, and data
 - **⚡ Code Generation**: Generates and executes PyQGIS code automatically
 - **🛡️ Safe Execution**: Built-in security prevents dangerous operations
-- **💻 Modern UI**: Clean, intuitive chat interface with markdown rendering and code highlighting
-- **🔄 Real-time Results**: See Python execution logs in a terminal-style panel
+- **💻 Modern UI (QML)**: Integrated QML chat with Markdown, per-block actions, and pastel bubbles
+- **🔄 Real-time Results in Chat**: Python execution logs appear as single, consolidated “System” messages (batched to avoid spam)
+- **🏷️ Model Labeling**: Each assistant reply shows the exact model name that produced it
 - **📊 Smart Context**: Knows about your layers, CRS, extents, and more
 - **🧩 Multiple Providers**: Google Gemini, OpenAI, Anthropic Claude, and Ollama (Local) — Ollama is the default
 - **🧪 One‑click Model Tests**: Validate Ollama models from the AI tab
@@ -89,7 +90,7 @@ In QGIS Copilot → AI tab → Provider = “Ollama (Local)”:
 - Click “Refresh Models” to populate available models
 - Select a model and click “Test Selected Model” to confirm it responds
 
-Logs panel shows a configuration snapshot (provider, model, base URL, prompt file, preferences, workspace) before requests. API responses are shown only in chat (keeps logs clean).
+Before a request, Copilot posts a single configuration snapshot (provider, model, base URL, prompt file, preferences, workspace) as one “System” message in the chat. API responses are shown only in chat.
 
 ### 🎯 First Steps
 
@@ -100,6 +101,12 @@ Logs panel shows a configuration snapshot (provider, model, base URL, prompt fil
 ---
 
 ## 📖 Documentation
+
+We maintain Sphinx docs (Read the Docs theme) for UI/UX and workflows:
+
+- Local build: `make -C docs html` → open `docs/_build/html/index.html`
+- Sources: `docs/source/`
+- UI/UX Guide: `docs/source/ui_ux.rst`
 
 ### ⚙️ AI Tab Overview
 
@@ -115,9 +122,12 @@ Logs panel shows a configuration snapshot (provider, model, base URL, prompt fil
 - `Google Gemini`: add an API key; pick a model (e.g., `gemini-1.5-pro`). Test your key from the AI tab.
 - `Anthropic Claude`: add an API key; pick a model (e.g., `claude-3-5-sonnet`). Test your key from the AI tab.
 
-### 📝 Markdown Responses
+### 📝 Chat UI behaviors
 
-Agent responses render markdown in the chat, including headings, lists, links, and fenced code blocks with PyQGIS‑friendly styling.
+- Hover actions are precise and steady (top‑right hotspot). Buttons don’t move or flicker.
+- Text blocks: Copy. Assistant code blocks: Copy · Edit · Run. Error logs: Debug.
+- Composer shows Send and a Clear icon (disabled until the chat has messages). The list extends under the composer to maximize space.
+- Code blocks render with black text on a soft gray background for readability.
 
 ### 🎯 Examples
 
@@ -222,16 +232,18 @@ For an in‑QGIS diagnostic:
 qgis_copilot/
 ├── 📄 __init__.py                         # Plugin initialization
 ├── 🧠 copilot_plugin.py                   # Main plugin class
-├── 💬 copilot_chat_dialog.py              # User interface (AI tab, chat, logs)
+├── 💬 copilot_chat_dialog.py              # Main UI (AI tab, integrated QML chat)
 ├── 🌐 gemini_api.py                       # Google Gemini integration
 ├── 🌐 openai_api.py                       # OpenAI ChatGPT integration
 ├── 🌐 claude_api.py                       # Anthropic Claude integration
 ├── 🖥️ ollama_api.py                       # Ollama (Local) integration
 ├── 🧪 ollama_connectivity_diagnostic.py   # Optional diagnostic helper
 ├── ⚡ pyqgis_executor.py                  # Code execution engine
-├── 📄 system_prompt.md                    # Agent system prompt (markdown)
+├── 📁 agents/                             # Agent prompts (qgis_agent_v3.5.md, qgis_agent_v3.4.md)
 ├── 📋 metadata.txt                        # Plugin metadata
-├── 🖼️ icon.png                            # Plugin icon
+├── 🖼️ figures/                            # UI assets (icons/images)
+├── 🗂️ ui/                                 # QML: ChatPanel.qml
+├── 📚 docs/                               # Sphinx docs (Read the Docs theme)
 ├── 📚 README.md                           # This file
 └── 📜 LICENSE                             # MIT License
 ```
@@ -479,19 +491,22 @@ copies or substantial portions of the Software.
 
 ## 📞 Contact & Support
 
-<div align="center">
+Made with ❤️ for the QGIS Community by:
 
-**Made with ❤️ for the QGIS Community**
+Morteza Khazaei, Ph.D. Candidate
 
-[🌐 Website](https://github.com/yourusername/qgis-copilot) •
-[🐛 Issues](https://github.com/yourusername/qgis-copilot/issues) •
-[💬 Discussions](https://github.com/yourusername/qgis-copilot/discussions) •
-[📧 Email](mailto:community@qgis.org)
+Department of Applied Geomatics
+Centre d’applications et de recherches en télédétection (CARTEL)
+University of Sherbrooke
+2500, Boulevard Université
+Sherbrooke (Québec), Canada, J1K 2R1
+
+Email: morteza.khazaei@usherbrooke.ca
+
+For bug reports and feature requests, please contact me by email. If this project is hosted in a Git repository, feel free to open issues there as well.
 
 ---
 
 ### ⭐ Star this project if you find it useful!
 
-**Happy mapping with your QGIS Copilot! 🗺️🤖**
-
-</div>
+Happy mapping with your QGIS Copilot! 🗺️🤖

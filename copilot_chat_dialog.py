@@ -184,22 +184,37 @@ class CopilotChatDialog(QDialog):
         chat_widget = QWidget()
         layout = QVBoxLayout(chat_widget)
 
-        # Try to render the QML chat; fallback to QTextBrowser if QtQuick is unavailable
+        # Try to render the QML chat via QQuickView (preferred for performance),
+        # fallback to QQuickWidget if unavailable; else use legacy QTextBrowser.
         self.qml_root = None
         qml_container = None
+        qml_path = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel.qml')
+        # Preferred: QQuickView wrapped in a window container
         try:
             try:
-                from qgis.PyQt.QtQuickWidgets import QQuickWidget
+                from qgis.PyQt.QtQuick import QQuickView
             except Exception:
-                from PyQt5.QtQuickWidgets import QQuickWidget
-            qml_container = QQuickWidget(chat_widget)
-            qml_container.setResizeMode(QQuickWidget.SizeRootObjectToView)
-            qml_path = os.path.join(os.path.dirname(__file__), 'ui', 'ChatPanel.qml')
-            qml_container.setSource(QUrl.fromLocalFile(qml_path))
-            self.qml_root = qml_container.rootObject()
+                from PyQt5.QtQuick import QQuickView
+            qv = QQuickView()
+            qv.setResizeMode(QQuickView.SizeRootObjectToView)
+            qv.setSource(QUrl.fromLocalFile(qml_path))
+            qml_container = QWidget.createWindowContainer(qv, chat_widget)
+            self.qml_root = qv.rootObject()
         except Exception:
-            qml_container = None
-            self.qml_root = None
+            # Fallback: QQuickWidget embedding
+            try:
+                try:
+                    from qgis.PyQt.QtQuickWidgets import QQuickWidget
+                except Exception:
+                    from PyQt5.QtQuickWidgets import QQuickWidget
+                qw = QQuickWidget(chat_widget)
+                qw.setResizeMode(QQuickWidget.SizeRootObjectToView)
+                qw.setSource(QUrl.fromLocalFile(qml_path))
+                qml_container = qw
+                self.qml_root = qw.rootObject()
+            except Exception:
+                qml_container = None
+                self.qml_root = None
 
         if self.qml_root is not None:
             # Provide assets directory and initial model/provider names

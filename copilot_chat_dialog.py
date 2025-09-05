@@ -348,72 +348,62 @@ class CopilotChatDialog(QDialog):
         workspace_group.setLayout(ws_layout)
         layout.addWidget(workspace_group)
 
-        # Chat and Execution Preferences
-        prefs_group = QGroupBox("Chat and Execution Preferences")
-        prefs_layout = QVBoxLayout()
+        # Conversation & Startup
+        conv_group = QGroupBox("Conversation and Startup")
+        conv_layout = QGridLayout()
         try:
-            prefs_layout.setContentsMargins(8, 8, 8, 8)
-            prefs_layout.setSpacing(6)
+            conv_layout.setContentsMargins(8, 8, 8, 8)
+            conv_layout.setHorizontalSpacing(8)
+            conv_layout.setVerticalSpacing(4)
         except Exception:
             pass
 
-        # Organized grid for checkboxes (2 columns)
-        grid = QGridLayout()
-        try:
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(8)
-            grid.setVerticalSpacing(4)
-        except Exception:
-            pass
-
-        # Chat context options (left column)
         self.include_context_cb = QCheckBox("Include QGIS Context")
         self.include_logs_cb = QCheckBox("Include Execution Logs in Context")
         self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
-        grid.addWidget(self.include_context_cb, 0, 0)
-        grid.addWidget(self.include_logs_cb, 1, 0)
-
-        # Startup behavior
+        self.include_docs_cb = QCheckBox("Include PyQGIS Docs Summary in Context")
+        self.include_docs_cb.setToolTip("Adds a brief, relevant summary from the PyQGIS Developer Cookbook to the AI context.")
         self.open_on_startup_cb = QCheckBox("Open panel on QGIS startup")
         self.open_on_startup_cb.setToolTip("Automatically open and dock the Copilot panel when QGIS starts.")
-        grid.addWidget(self.open_on_startup_cb, 2, 0)
 
-        # Execution behavior options (right column)
+        conv_layout.addWidget(self.include_context_cb, 0, 0)
+        conv_layout.addWidget(self.include_logs_cb,   1, 0)
+        conv_layout.addWidget(self.include_docs_cb,   2, 0)
+        conv_layout.addWidget(self.open_on_startup_cb,3, 0)
+        conv_group.setLayout(conv_layout)
+        layout.addWidget(conv_group)
+
+        # Execution & Safety
+        exec_group = QGroupBox("Execution and Safety")
+        exec_layout = QGridLayout()
+        try:
+            exec_layout.setContentsMargins(8, 8, 8, 8)
+            exec_layout.setHorizontalSpacing(8)
+            exec_layout.setVerticalSpacing(4)
+        except Exception:
+            pass
+
         self.auto_execute_cb = QCheckBox("Auto-execute Code")
         self.auto_feedback_cb = QCheckBox("Auto Request Improvements on Errors")
         self.auto_feedback_cb.setToolTip("Automatically ask AI to improve code when execution fails")
         self.auto_feedback_cb.toggled.connect(self.on_auto_feedback_toggled)
-        grid.addWidget(self.auto_execute_cb, 0, 1)
-        grid.addWidget(self.auto_feedback_cb, 1, 1)
-
-        # Advanced: Relax safety checks (dangerous)
-        self.relaxed_safety_cb = QCheckBox("Relax Safety Checks (advanced)")
-        self.relaxed_safety_cb.setToolTip("Allows more operations in generated scripts (still blocks exec/eval/subprocess). Use with caution.")
-        grid.addWidget(self.relaxed_safety_cb, 2, 1)
-
-        # Console execution option spans both columns
         self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
         self.run_in_console_cb.setToolTip("Writes code to a file in your Workspace, opens it in the QGIS Python Editor, then executes it for native logging/tracebacks.")
-        grid.addWidget(self.run_in_console_cb, 3, 0, 1, 2)
-
-        # Include docs summary option
-        self.include_docs_cb = QCheckBox("Include PyQGIS Docs Summary in Context")
-        self.include_docs_cb.setToolTip("Scrapes the PyQGIS Developer Cookbook and adds a brief, relevant summary to the AI context.")
-        grid.addWidget(self.include_docs_cb, 4, 0, 1, 2)
-
-        # New: Strict pre-execution validation gate
         self.strict_validation_cb = QCheckBox("Strict Pre-execution Validation (block on API errors)")
         self.strict_validation_cb.setToolTip("Validates generated code against the live PyQGIS API before running. Blocks execution when errors are detected.")
-        grid.addWidget(self.strict_validation_cb, 5, 0, 1, 2)
-
-        # New: Include live API signatures in AI context
         self.include_api_sigs_cb = QCheckBox("Include Live PyQGIS API Signatures in Context")
         self.include_api_sigs_cb.setToolTip("Adds version-accurate method signatures for relevant classes to guide the AI and reduce guesswork.")
-        grid.addWidget(self.include_api_sigs_cb, 6, 0, 1, 2)
+        self.relaxed_safety_cb = QCheckBox("Relax Safety Checks (advanced)")
+        self.relaxed_safety_cb.setToolTip("Allows more operations in generated scripts (still blocks exec/eval/subprocess). Use with caution.")
 
-        prefs_layout.addLayout(grid)
-        prefs_group.setLayout(prefs_layout)
-        layout.addWidget(prefs_group)
+        exec_layout.addWidget(self.auto_execute_cb,        0, 0)
+        exec_layout.addWidget(self.auto_feedback_cb,       1, 0)
+        exec_layout.addWidget(self.run_in_console_cb,      2, 0, 1, 2)
+        exec_layout.addWidget(self.strict_validation_cb,   3, 0, 1, 2)
+        exec_layout.addWidget(self.include_api_sigs_cb,    4, 0, 1, 2)
+        exec_layout.addWidget(self.relaxed_safety_cb,      5, 0)
+        exec_group.setLayout(exec_layout)
+        layout.addWidget(exec_group)
 
         settings_widget.setLayout(layout)
         return settings_widget

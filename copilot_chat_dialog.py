@@ -23,7 +23,6 @@ from .claude_api import ClaudeAPI
 from .ollama_api import OllamaAPI
 from .pyqgis_executor import EnhancedPyQGISExecutor
 from .pyqgis_api_validator import PyQGISAPIValidator
-from . import web_kb
 
 
 class CopilotChatDialog(QDialog):
@@ -361,15 +360,12 @@ class CopilotChatDialog(QDialog):
         self.include_context_cb = QCheckBox("Include QGIS Context")
         self.include_logs_cb = QCheckBox("Include Execution Logs in Context")
         self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
-        self.include_docs_cb = QCheckBox("Include PyQGIS Docs Summary in Context")
-        self.include_docs_cb.setToolTip("Adds a brief, relevant summary from the PyQGIS Developer Cookbook to the AI context.")
         self.open_on_startup_cb = QCheckBox("Open panel on QGIS startup")
         self.open_on_startup_cb.setToolTip("Automatically open and dock the Copilot panel when QGIS starts.")
 
         conv_layout.addWidget(self.include_context_cb, 0, 0)
         conv_layout.addWidget(self.include_logs_cb,   1, 0)
-        conv_layout.addWidget(self.include_docs_cb,   2, 0)
-        conv_layout.addWidget(self.open_on_startup_cb,3, 0)
+        conv_layout.addWidget(self.open_on_startup_cb,2, 0)
         conv_group.setLayout(conv_layout)
         layout.addWidget(conv_group)
 
@@ -1086,17 +1082,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         except Exception:
             pass
 
-        # Add docs summary if requested
-        if self.include_docs_cb.isChecked():
-            try:
-                summary = web_kb.get_relevant_summary(message)
-                if summary:
-                    if context:
-                        context += "\n\n" + summary
-                    else:
-                        context = summary
-            except Exception:
-                pass
+        # Docs summary integration removed (web scraping dropped)
 
         # Skip verbose provider/config snapshot for submitted tasks
 
@@ -1161,7 +1147,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.auto_feedback_cb.setChecked(settings.value("qgis_copilot/prefs/auto_feedback", False, type=bool))
         self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", True, type=bool))
         self.relaxed_safety_cb.setChecked(settings.value("qgis_copilot/prefs/relaxed_safety", False, type=bool))
-        self.include_docs_cb.setChecked(settings.value("qgis_copilot/prefs/include_docs", True, type=bool))
+        # Docs summary integration removed
         self.open_on_startup_cb.setChecked(settings.value("qgis_copilot/prefs/open_on_startup", True, type=bool))
         self.strict_validation_cb.setChecked(settings.value("qgis_copilot/prefs/strict_validation", False, type=bool))
         self.include_api_sigs_cb.setChecked(settings.value("qgis_copilot/prefs/include_api_signatures", True, type=bool))
@@ -1174,7 +1160,6 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.auto_feedback_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/auto_feedback", v))
         self.run_in_console_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/run_in_console", v))
         self.relaxed_safety_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/relaxed_safety", v))
-        self.include_docs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_docs", v))
         self.open_on_startup_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/open_on_startup", v))
         self.strict_validation_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/strict_validation", v))
         self.include_api_sigs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_api_signatures", v))

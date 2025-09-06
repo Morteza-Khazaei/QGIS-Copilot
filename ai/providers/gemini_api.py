@@ -4,7 +4,7 @@ Google Gemini API Integration for QGIS Copilot
 
 import json
 import requests
-from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal, QThread
 from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
@@ -213,94 +213,87 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         """Get the stored API key"""
         return self.settings.value("qgis_copilot/api_key", "")
     
+    class _Worker(QThread):
+        result = pyqtSignal(str)
+        failed = pyqtSignal(str)
+
+        def __init__(self, url, payload, timeout=30):
+            super().__init__()
+            self.url = url
+            self.payload = payload
+            self.timeout = timeout
+
+        def run(self):
+            try:
+                response = requests.post(
+                    self.url,
+                    headers={"Content-Type": "application/json"},
+                    json=self.payload,
+                    timeout=self.timeout
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        content = data["candidates"][0]["content"]["parts"][0]["text"]
+                        if isinstance(content, str) and content.strip():
+                            self.result.emit(content)
+                        else:
+                            self.failed.emit("No response generated")
+                    else:
+                        self.failed.emit("No response generated")
+                else:
+                    self.failed.emit(f"API Error {response.status_code}: {response.text}")
+            except Exception as e:
+                self.failed.emit(f"Request failed: {e}")
+
     def send_message(self, message, context=None):
-        """Send a message to Gemini API with QGIS context"""
+        """Send a message to Gemini API with QGIS context in a worker thread"""
         if not self.api_key:
             self.error_occurred.emit("No API key configured")
             return
-        
-        # Prepare the request
+
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
-        
-        # Prepare user content with context
+
         user_content = message
         if context:
             user_content = f"Current QGIS Context:\n{context}\n\nUser Question: {message}"
-        
+
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "text": user_content
-                        }
-                    ]
-                }
-            ],
-            "system_instruction": {
-                "parts": [
-                    {"text": self.system_prompt}
-                ]
-            },
-            "generationConfig": {
-                "temperature": 0.7,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 2048,
-            },
+            "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+            "system_instruction": {"parts": [{"text": self.system_prompt}]},
+            "generationConfig": {"temperature": 0.7, "topK": 40, "topP": 0.95, "maxOutputTokens": 2048},
             "safetySettings": [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                }
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
             ]
         }
-        
+
+        worker = GeminiAPI._Worker(url, payload, timeout=30)
+        self._current_worker = worker
+        worker.result.connect(self.response_received.emit)
+        worker.failed.connect(self.error_occurred.emit)
+        worker.finished.connect(lambda: setattr(self, "_current_worker", None))
+        worker.start()
+
+    def cancel(self):
+        """Cancel in-flight worker (best-effort)."""
         try:
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if "candidates" in data and len(data["candidates"]) > 0:
-                    content = data["candidates"][0]["content"]["parts"][0]["text"]
-                    self.response_received.emit(content)
-                else:
-                    self.error_occurred.emit("No response generated")
-            else:
-                error_msg = f"API Error {response.status_code}: {response.text}"
-                self.error_occurred.emit(error_msg)
-                QgsMessageLog.logMessage(
-                    error_msg, 
-                    "QGIS Copilot", 
-                    level=Qgis.Critical
-                )
-                
-        except Exception as e:
-            error_msg = f"Request failed: {str(e)}"
-            self.error_occurred.emit(error_msg)
-            QgsMessageLog.logMessage(
-                error_msg, 
-                "QGIS Copilot", 
-                level=Qgis.Critical
-            )
+            w = getattr(self, "_current_worker", None)
+            if w and w.isRunning():
+                try:
+                    w.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    w.terminate()
+                except Exception:
+                    pass
+                self._current_worker = None
+                self.error_occurred.emit("Request cancelled by user")
+        except Exception:
+            pass
     
     def get_qgis_context(self, iface):
         """Extract current QGIS context information"""

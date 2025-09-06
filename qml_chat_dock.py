@@ -159,7 +159,11 @@ class QMLChatDock(QObject):
                 try:
                     root.copyRequested.connect(self.on_copy)
                     root.editRequested.connect(self.on_edit)
-                    root.runRequested.connect(self.on_run)
+            root.runRequested.connect(self.on_run)
+            try:
+                root.stopRequested.connect(self.on_stop)
+            except Exception:
+                pass
                     if hasattr(root, 'runCodeRequested'):
                         root.runCodeRequested.connect(self.on_run_code)
                     if hasattr(root, 'debugRequested'):
@@ -348,9 +352,36 @@ class QMLChatDock(QObject):
         if not code.strip():
             return
         try:
-            # Save to sticky task file with a generic hint
+            # Save to a fresh task file with a derived hint (user message > code > timestamp)
             fenced = f"```python\n{code}\n```"
-            path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint="qml_chat_task", quiet=True)
+            try:
+                self.dialog.pyqgis_executor.reset_task_file()
+            except Exception:
+                pass
+            hint = None
+            try:
+                for item in reversed(self.dialog.chat_history):
+                    if item.get('sender') == 'You':
+                        cand = (item.get('message') or '').strip().splitlines()[0]
+                        hint = cand[:80] if cand else None
+                        break
+            except Exception:
+                hint = None
+            if not hint:
+                try:
+                    first = next((ln for ln in code.splitlines() if ln.strip()), '')
+                    hint = first[:80] if first else None
+                except Exception:
+                    hint = None
+            if not hint:
+                from datetime import datetime as _dt
+                hint = f"task_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+            path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=hint, quiet=True)
+            try:
+                # Inform in QML chat where the script was saved
+                self._root.appendMessage("system", f"Script file: {path}", "")
+            except Exception:
+                pass
             if path and os.path.exists(path):
                 self.dialog._open_file_in_python_console_editor(path)
                 # Add system message to QML chat
@@ -376,7 +407,7 @@ class QMLChatDock(QObject):
                 run_via_console = False
                 try:
                     from qgis.PyQt.QtCore import QSettings
-                    run_via_console = QSettings().value("qgis_copilot/prefs/run_in_console", True, type=bool)
+                run_via_console = QSettings().value("qgis_copilot/prefs/run_in_console", False, type=bool)
                 except Exception:
                     pass
                 # Start capture to collate logs with the executed code
@@ -384,7 +415,30 @@ class QMLChatDock(QObject):
                 if run_via_console:
                     try:
                         fenced = f"```python\n{code}\n```"
-                        path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint="qml_chat_task", quiet=True)
+                        try:
+                            self.dialog.pyqgis_executor.reset_task_file()
+                        except Exception:
+                            pass
+                        hint = None
+                        try:
+                            for item in reversed(self.dialog.chat_history):
+                                if item.get('sender') == 'You':
+                                    cand = (item.get('message') or '').strip().splitlines()[0]
+                                    hint = cand[:80] if cand else None
+                                    break
+                        except Exception:
+                            hint = None
+                        if not hint:
+                            first = next((ln for ln in code.splitlines() if ln.strip()), '') if code else ''
+                            hint = first[:80] if first else None
+                        if not hint:
+                            from datetime import datetime as _dt
+                            hint = f"task_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+                        path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=hint, quiet=True)
+                        try:
+                            self._root.appendMessage("system", f"Script file: {path}", "")
+                        except Exception:
+                            pass
                         self.dialog.pyqgis_executor.execute_task_file(path)
                     except Exception:
                         self.dialog.pyqgis_executor.execute_code(code)
@@ -407,6 +461,39 @@ class QMLChatDock(QObject):
                     pass
         except Exception:
             pass
+        finally:
+            try:
+                if self._root:
+                    self._root.requestInFlight = true
+            except Exception:
+                pass
+
+    @pyqtSlot()
+    def on_stop(self):
+        """Handle Stop from QML composer: cancel in-flight provider request and end capture."""
+        try:
+            if hasattr(self.dialog, 'cancel_current_request'):
+                self.dialog.cancel_current_request()
+        except Exception:
+            pass
+        # Stop run capture if active
+        try:
+            if getattr(self, '_cap_active', False):
+                self._cap_active = False
+                self._cap_logs = []
+                self._cap_code = ""
+                execu = getattr(self.dialog, 'pyqgis_executor', None)
+                if execu:
+                    try:
+                        execu.logs_updated.disconnect(self._on_run_log)
+                    except Exception:
+                        pass
+                    try:
+                        execu.execution_completed.disconnect(self._on_run_completed)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     @pyqtSlot(str)
     def on_run_code(self, code_text: str):
@@ -417,7 +504,7 @@ class QMLChatDock(QObject):
         run_via_console = False
         try:
             from qgis.PyQt.QtCore import QSettings
-            run_via_console = QSettings().value("qgis_copilot/prefs/run_in_console", True, type=bool)
+            run_via_console = QSettings().value("qgis_copilot/prefs/run_in_console", False, type=bool)
         except Exception:
             pass
         try:
@@ -425,7 +512,30 @@ class QMLChatDock(QObject):
             self._begin_run_capture(code)
             if run_via_console:
                 fenced = f"```python\n{code}\n```"
-                path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint="qml_chat_task", quiet=True)
+                try:
+                    self.dialog.pyqgis_executor.reset_task_file()
+                except Exception:
+                    pass
+                hint = None
+                try:
+                    for item in reversed(self.dialog.chat_history):
+                        if item.get('sender') == 'You':
+                            cand = (item.get('message') or '').strip().splitlines()[0]
+                            hint = cand[:80] if cand else None
+                            break
+                except Exception:
+                    hint = None
+                if not hint:
+                    first = next((ln for ln in code.splitlines() if ln.strip()), '') if code else ''
+                    hint = first[:80] if first else None
+                if not hint:
+                    from datetime import datetime as _dt
+                    hint = f"task_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+                path = self.dialog.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=hint, quiet=True)
+                try:
+                    self._root.appendMessage("system", f"Script file: {path}", "")
+                except Exception:
+                    pass
                 self.dialog.pyqgis_executor.execute_task_file(path)
             else:
                 self.dialog.pyqgis_executor.execute_code(code)
@@ -497,6 +607,11 @@ class QMLChatDock(QObject):
             self._cap_active = False
             self._cap_logs = []
             self._cap_code = ""
+            try:
+                if self._root:
+                    self._root.requestInFlight = false
+            except Exception:
+                pass
 
     def _looks_like_code(self, s: str) -> bool:
         try:

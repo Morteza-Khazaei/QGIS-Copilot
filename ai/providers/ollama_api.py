@@ -347,6 +347,26 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         worker.finished.connect(lambda: setattr(self, "_current_worker", None))
         worker.start()
 
+    def cancel(self):
+        """Attempt to cancel the in-flight request (best-effort)."""
+        try:
+            w = getattr(self, "_current_worker", None)
+            if w and w.isRunning():
+                # Best-effort: ask thread to quit or terminate the blocking request
+                try:
+                    w.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    w.terminate()
+                except Exception:
+                    pass
+                self._current_worker = None
+                # Emit a user-friendly cancellation notice
+                self.error_occurred.emit("Request cancelled by user")
+        except Exception:
+            pass
+
     def get_qgis_context(self, iface):
         """Extract current QGIS context information (same shape as other providers)."""
         try:

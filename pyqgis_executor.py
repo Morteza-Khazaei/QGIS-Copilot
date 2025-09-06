@@ -24,14 +24,14 @@ from qgis.core import (
     QgsFeature, QgsGeometry, QgsField, QgsPointXY, QgsCoordinateReferenceSystem,
     edit
 )
-from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QObject, pyqtSignal, QVariant, QSettings
 import json
 from .ai.utils.pyqgis_api_validator import PyQGISAPIValidator
-from .copilot.guards.preflight import validate as manifest_preflight_validate
-from .copilot.manifest.qgis_oracle import load_manifest
-from .copilot.guards.runtime import safe_call as _safe_call
-from .copilot.renderer.layout_renderer import render_layout as _render_layout
+# Lightweight local log no-ops to avoid external deps
+def _log_info(*a, **k):
+    return None
+def _log_warn(*a, **k):
+    return None
 
 
 class ExecutionLog:
@@ -144,8 +144,8 @@ class EnhancedPyQGISExecutor(QObject):
             'sum': sum,
             'abs': abs,
             'round': round,
-            # Guarded call helper
-            'safe_call': _safe_call,
+            # Guarded call helper (local)
+            'safe_call': self._safe_call,
         }
         
         # Import commonly used QGIS modules
@@ -182,31 +182,7 @@ class EnhancedPyQGISExecutor(QObject):
         
         return code_blocks
 
-    def _extract_json_spec_from_response(self, text):
-        """Attempt to extract a JSON layout/spec from the response."""
-        try:
-            # Prefer fenced json blocks
-            fence = r"```|~~~"
-            json_pat = rf'(?:{fence})(?:json|layout_spec)?[ \t]*\r?\n([\s\S]*?)\r?\n?(?:{fence})'
-            blocks = re.findall(json_pat, text, re.DOTALL)
-            for b in blocks:
-                b2 = b.strip()
-                if b2.startswith('{') and b2.endswith('}'):
-                    try:
-                        return json.loads(b2)
-                    except Exception:
-                        continue
-            # Whole message as JSON
-            t = (text or '').strip()
-            if t.startswith('{') and t.endswith('}'):
-                return json.loads(t)
-        except Exception:
-            pass
-        return None
-
-    def render_layout_spec(self, spec: dict):
-        """Public entry to render a layout spec via the trusted renderer."""
-        return _render_layout(spec)
+    # Removed: _extract_json_spec_from_response, render_layout_spec (DSL removed)
     
     def is_safe_code(self, code):
         """Check if code is safe to execute (supports relaxed mode)."""
@@ -264,47 +240,7 @@ class EnhancedPyQGISExecutor(QObject):
         # Pre-process QGIS imports consistently
         code = self._clean_qgis_imports(code)
 
-        # Manifest-based preflight validation with header/type enforcement
-        try:
-            header = self._extract_header_json(code)
-        except Exception:
-            header = None
-        try:
-            errs, tips, types = manifest_preflight_validate(code)
-        except Exception:
-            errs, tips, types = [], [], {}
-        if not header and not types:
-            msg = (
-                "Execution blocked: missing agent header JSON and type hints. "
-                "Provide a header with 'vars' and 'symbols_planned' or add type hints like 'x: QgsClass = QgsClass()'."
-            )
-            execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
-            self.add_to_history(execution_log)
-            self.execution_completed.emit(msg, False, execution_log)
-            return
-        if header and isinstance(header, dict) and header.get('symbols_planned'):
-            try:
-                man = load_manifest()
-                _, all_methods = self._index_manifest(man)
-                missing = [s for s in header['symbols_planned'] if s not in all_methods]
-                if missing:
-                    msg = "Blocked: unknown symbols in header — " + ", ".join(missing)
-                    execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
-                    self.add_to_history(execution_log)
-                    self.execution_completed.emit(msg, False, execution_log)
-                    return
-            except Exception:
-                pass
-        if errs:
-            suggestions = []
-            for (var, cls, attr), close in zip(errs, tips):
-                hint = f" Did you mean: {', '.join(close)}" if close else ""
-                suggestions.append(f"{cls}.{attr} on '{var}' not found.{hint}")
-            msg = "Execution blocked by manifest preflight.\n" + "\n".join(suggestions)
-            execution_log = ExecutionLog(code=original_code, success=False, output="", error_msg=msg, execution_time=0)
-            self.add_to_history(execution_log)
-            self.execution_completed.emit(msg, False, execution_log)
-            return
+        # Manifest preflight removed — proceed to API validation only
 
         # Run API validation and optionally gate execution (Strict Mode)
         try:
@@ -359,21 +295,36 @@ class EnhancedPyQGISExecutor(QObject):
             )
             return
         
-        # Capture stdout and stderr
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
+        # Capture stdout and stderr and execute compiled code with a proper filename
         stdout_capture = StringIO()
         stderr_capture = StringIO()
-        
+
+        # Use the current task file, if any, for better tracebacks
         try:
-            # Redirect output
-            sys.stdout = stdout_capture
-            sys.stderr = stderr_capture
-            
-            # Execute the code
-            exec(code, self.globals)
-            
-            # Get the captured output
+            code_filename = self._current_task_file or '<in-memory>'
+        except Exception:
+            code_filename = '<in-memory>'
+
+        try:
+            compiled = compile(code, code_filename, 'exec')
+        except SyntaxError as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Execution error: {e}\nTraceback:\n{traceback.format_exc()}"
+            execution_log = ExecutionLog(
+                code=original_code,
+                success=False,
+                output="",
+                error_msg=error_msg,
+                execution_time=execution_time
+            )
+            self.add_to_history(execution_log)
+            self.execution_completed.emit(error_msg, False, execution_log)
+            return
+
+        try:
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                exec(compiled, self.globals)
+
             stdout_output = stdout_capture.getvalue()
             stderr_output = stderr_capture.getvalue()
             
@@ -400,9 +351,7 @@ class EnhancedPyQGISExecutor(QObject):
             
             self.add_to_history(execution_log)
             
-            # Refresh map canvas if available
-            if self.iface:
-                self.iface.mapCanvas().refresh()
+            # Avoid forced canvas refresh to keep UI responsive; user can refresh as needed
             
             self.execution_completed.emit(result, True, execution_log)
             
@@ -441,16 +390,14 @@ class EnhancedPyQGISExecutor(QObject):
             self.logs_updated.emit(self.format_log_for_ui(execution_log))
         except Exception:
             # Fallback to minimal status line
-            ts = execution_log.timestamp.strftime("%H:%M:%S")
             status = "✅ SUCCESS" if execution_log.success else "❌ ERROR"
-            self.logs_updated.emit(f"[{ts}] {status} (execution time: {execution_log.execution_time:.3f}s)\n" + "-" * 50 + "\n")
+            self.logs_updated.emit(f"{status} (execution time: {execution_log.execution_time:.3f}s)\n" + "-" * 50 + "\n")
 
     def format_log_for_ui(self, log: ExecutionLog) -> str:
         """Format a log entry for the UI/Log Messages without including the Python code body."""
         parts = []
-        ts = log.timestamp.strftime("%H:%M:%S")
         status = "✅ SUCCESS" if log.success else "❌ ERROR"
-        parts.append(f"[{ts}] {status} (execution time: {log.execution_time:.3f}s)")
+        parts.append(f"{status} (execution time: {log.execution_time:.3f}s)")
         if log.output:
             parts.append(f"OUTPUT:\n{log.output}")
         if not log.success and log.error_msg:
@@ -484,46 +431,26 @@ class EnhancedPyQGISExecutor(QObject):
             cleaned_lines.append(line)
         return '\n'.join(cleaned_lines)
 
-    def _extract_header_json(self, code: str):
-        """Extract a leading JSON header embedded as commented lines.
-
-        Example header:
-        # {
-        #   "vars": {"color_shader": "QgsColorRampShader"},
-        #   "symbols_planned": ["QgsColorRampShader.setSourceColorRamp"]
-        # }
-        """
+    def _safe_call(self, obj, method, *args, **kw):
+        """Local safe_call helper: provides a hint when a method is missing."""
         try:
-            lines = code.splitlines()
+            import difflib as _difflib
         except Exception:
-            return None
-        header_lines = []
-        started = False
-        for line in lines[:50]:
-            stripped = line.strip()
-            if stripped.startswith('#'):
-                started = True
-                header_lines.append(stripped.lstrip('#').strip())
-            else:
-                if started:
-                    break
-        text = "\n".join(header_lines).strip()
-        if not text.startswith('{') or not text.endswith('}'):
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            return None
+            _difflib = None
+        if not hasattr(obj, method):
+            hint = []
+            try:
+                if _difflib is not None:
+                    hint = _difflib.get_close_matches(method, dir(obj), n=1)
+            except Exception:
+                hint = []
+            msg = f"{type(obj).__name__}.{method} not found."
+            if hint:
+                msg += f" Did you mean '{hint[0]}'?"
+            raise AttributeError(msg)
+        return getattr(obj, method)(*args, **kw)
 
-    def _index_manifest(self, man: dict):
-        classes, methods = set(), set()
-        for _mod, items in man.get('modules', {}).items():
-            for cls, entry in items.items():
-                if entry.get('kind') == 'class':
-                    classes.add(cls)
-                    for a in (entry.get('attrs') or {}).keys():
-                        methods.add(f"{cls}.{a}")
-        return classes, methods
+    # Removed: _extract_header_json, _index_manifest (manifest removed)
 
     def _static_validate_code(self, code: str):
         """Lightweight static checks using live PyQGIS API via introspection.
@@ -943,34 +870,7 @@ class EnhancedPyQGISExecutor(QObject):
         except Exception:
             pass
 
-        # Best-effort: Open the script in the QGIS Python Console editor
-        try:
-            if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
-                self.iface.actionShowPythonDialog().trigger()
-        except Exception:
-            pass
-        try:
-            import qgis.utils as qutils
-            pc = None
-            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
-                pc = qutils.plugins.get('PythonConsole')
-            for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
-                if pc and hasattr(pc, meth):
-                    try:
-                        getattr(pc, meth)(file_path)
-                        break
-                    except Exception:
-                        pass
-            # Best-effort: try to directly execute the script from the console plugin
-            for run_meth in ('runScriptFile', 'execScriptFile', 'executeScriptFile', 'runFile'):
-                if pc and hasattr(pc, run_meth):
-                    try:
-                        getattr(pc, run_meth)(file_path)
-                        break
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        # Do not open the QGIS Python Console editor automatically — avoid UI overhead
 
         wrapper_cmd = (
             "from pathlib import Path\n"
@@ -988,193 +888,12 @@ class EnhancedPyQGISExecutor(QObject):
         self.add_to_history(notice_log)
         self._execute_raw_with_wrapper(original_code=original_code, wrapper_code=wrapper_cmd)
 
-    def execute_gemini_response(self, response_text, filename_hint: str = None):
-        """Extract, save, and execute code from QGIS Copilot response.
+    # Removed: execute_gemini_response (unused)
+    def execute_gemini_response(self, *args, **kwargs):
+        raise NotImplementedError("execute_gemini_response is removed")
 
-        If multiple fenced code blocks are present, merge them into a single
-        script to keep a single runnable output per response.
-        """
-        code_blocks = self.extract_code_blocks(response_text)
-        
-        if not code_blocks:
-            execution_log = ExecutionLog(
-                code="",
-                success=False,
-                output="",
-                error_msg="No executable code found in the response.",
-                execution_time=0
-            )
-            self.execution_completed.emit(
-                "No executable code found in the response.", 
-                False,
-                execution_log
-            )
-            return
-        
-        # Save merged code for this task under a distinct filename
-        try:
-            fpath = self._ensure_task_file(filename_hint)
-            merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
-            merged = self._clean_qgis_imports(merged)
-            with open(fpath, 'w', encoding='utf-8') as fh:
-                fh.write(merged)
-            # Log save event
-            saved_log = ExecutionLog(
-                code=f"# File saved: {fpath}",
-                success=True,
-                output=f"Saved task script to: {fpath}",
-                execution_time=0,
-            )
-            self.add_to_history(saved_log)
-            # Static validation summary
-            try:
-                issues = self._static_validate_code(merged)
-                if issues:
-                    out = "Static validation results:\n" + "\n".join(issues)
-                    self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # Execute each code block
-        for i, code in enumerate(code_blocks):
-            if len(code_blocks) > 1:
-                result_msg = f"Executing code block {i+1}/{len(code_blocks)}:\n"
-                # Create a simple log for the block separator
-                separator_log = ExecutionLog(
-                    code=f"# Block {i+1}/{len(code_blocks)}",
-                    success=True,
-                    output=result_msg,
-                    execution_time=0
-                )
-                self.execution_completed.emit(result_msg, True, separator_log)
-            
-            self.execute_code(code.strip())
-
-    def execute_response_via_console(self, response_text, filename_hint: str = None):
-        """Extract code, write to a task-named script, open in QGIS Python editor, and run via exec(Path(...).read_text())."""
-        code_blocks = self.extract_code_blocks(response_text)
-
-        if not code_blocks:
-            execution_log = ExecutionLog(
-                code="",
-                success=False,
-                output="",
-                error_msg="No executable code found in the response.",
-                execution_time=0
-            )
-            self.execution_completed.emit(
-                "No executable code found in the response.",
-                False,
-                execution_log
-            )
-            return
-
-        # Merge all code blocks to keep a single script file for iterative improvements
-        merged = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in code_blocks).strip()
-        # Light cleanup to avoid common pitfalls
-        # - Remove incorrect iface import (iface is provided by QGIS and injected)
-        merged = re.sub(r"^\s*from\s+qgis\.gui\s+import\s+iface\s*$", "", merged, flags=re.MULTILINE)
-        merged_code = self._clean_qgis_imports(merged)
-
-        # Write to a stable file path in the workspace
-        try:
-            fpath = self._ensure_task_file(filename_hint)
-            compat_header = (
-                "# QGIS Copilot compatibility header (QVariant shim for QGIS 3)\n"
-                "try:\n"
-                "    import qgis\n"
-                "    import qgis.core as _qcore\n"
-                "    from qgis.PyQt.QtCore import QVariant as _QVariant\n"
-                "    if not hasattr(_qcore, 'QVariant'):\n"
-                "        setattr(_qcore, 'QVariant', _QVariant)\n"
-                "except Exception:\n"
-                "    pass\n\n"
-            )
-            with open(fpath, 'w', encoding='utf-8') as fh:
-                fh.write(compat_header)
-                fh.write(merged_code)
-
-            # Run static validation and emit findings before execution
-            try:
-                issues = self._static_validate_code(merged_code)
-                if issues:
-                    out = "Static validation results:\n" + "\n".join(issues)
-                    self.add_to_history(ExecutionLog(code="", success=True, output=out, execution_time=0))
-            except Exception:
-                pass
-
-            # Try to open the Python console and load the script in the editor (best-effort)
-            try:
-                if self.iface and hasattr(self.iface, 'actionShowPythonDialog'):
-                    self.iface.actionShowPythonDialog().trigger()
-            except Exception as e:
-                QgsMessageLog.logMessage(f"Could not open Python Console automatically: {e}", "QGIS Copilot", level=Qgis.Warning)
-
-            # Attempt to open in console editor via internal plugin if exposed
-            try:
-                import qgis.utils as qutils
-                pc = None
-                if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
-                    pc = qutils.plugins.get('PythonConsole')
-                for meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
-                    if pc and hasattr(pc, meth):
-                        try:
-                            getattr(pc, meth)(fpath)
-                            break
-                        except Exception:
-                            pass
-                # Best-effort: try to directly execute the script from the console plugin
-                for run_meth in ('runScriptFile', 'execScriptFile', 'executeScriptFile', 'runFile'):
-                    if pc and hasattr(pc, run_meth):
-                        try:
-                            getattr(pc, run_meth)(fpath)
-                            break
-                        except Exception:
-                            pass
-                try:
-                    console = getattr(pc, 'console', None)
-                    if console and hasattr(console, 'runCommand'):
-                        console.runCommand(f"from pathlib import Path; exec(Path(r'{fpath}').read_text())")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # Build and run the exec command with a QVariant shim
-            wrapper_cmd = (
-                "from pathlib import Path\n"
-                "import qgis\n"
-                "from qgis.PyQt.QtCore import QVariant as _QVariant\n"
-                "import qgis.core as _qcore\n"
-                "setattr(_qcore, 'QVariant', _QVariant)\n"
-                f"__code__ = Path(r'{fpath}').read_text()\n"
-                f"exec(compile(__code__, r'{fpath}', 'exec'), globals())"
-            )
-            preface = (
-                f"Script saved to workspace: {fpath}\n"
-                f"Executing via:\n{wrapper_cmd}\n"
-            )
-            separator_log = ExecutionLog(
-                code=f"# File: {fpath}",
-                success=True,
-                output=preface,
-                execution_time=0
-            )
-            self.add_to_history(separator_log)
-            self._execute_raw_with_wrapper(original_code=merged_code, wrapper_code=wrapper_cmd)
-        except Exception as e:
-            err = f"Failed to write or execute script: {e}"
-            execution_log = ExecutionLog(
-                code=merged_code,
-                success=False,
-                output="",
-                error_msg=err,
-                execution_time=0
-            )
-            self.add_to_history(execution_log)
-            self.execution_completed.emit(err, False, execution_log)
+    def execute_response_via_console(self, *args, **kwargs):
+        raise NotImplementedError("execute_response_via_console is removed")
 
     def get_workspace_dir(self):
         """Get or create the workspace directory where scripts are saved."""
@@ -1252,8 +971,7 @@ class EnhancedPyQGISExecutor(QObject):
                 execution_time=execution_time
             )
             self.add_to_history(execution_log)
-            if self.iface:
-                self.iface.mapCanvas().refresh()
+            # Avoid forced canvas refresh to keep UI responsive
             self.execution_completed.emit(result, True, execution_log)
         except Exception as e:
             execution_time = time.time() - start_time
@@ -1269,8 +987,8 @@ class EnhancedPyQGISExecutor(QObject):
             self.add_to_history(execution_log)
             self.execution_completed.emit(error_msg, False, execution_log)
         finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
+            # Streams auto-restored by context managers
+            pass
     
     def suggest_improvement(self, failed_execution_log):
         """Analyze failed execution and suggest improvements to AI"""
@@ -1320,20 +1038,4 @@ class EnhancedPyQGISExecutor(QObject):
 
         self.improvement_suggested.emit(code, suggestion)
     
-    def get_available_functions(self):
-        """Get list of available QGIS functions for context"""
-        functions = []
-        
-        # Add iface methods
-        if self.iface:
-            iface_methods = [method for method in dir(self.iface) 
-                           if not method.startswith('_') and callable(getattr(self.iface, method))]
-            functions.extend([f"iface.{method}" for method in iface_methods[:10]])  # Limit for brevity
-        
-        # Add project methods
-        project = QgsProject.instance()
-        project_methods = [method for method in dir(project) 
-                          if not method.startswith('_') and callable(getattr(project, method))]
-        functions.extend([f"project.{method}" for method in project_methods[:10]])
-        
-        return functions
+    # Removed: get_available_functions (unused)

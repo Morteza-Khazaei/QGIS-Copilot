@@ -21,6 +21,7 @@ from .ai.providers.gemini_api import GeminiAPI
 from .ai.providers.openai_api import OpenAIAPI
 from .ai.providers.claude_api import ClaudeAPI
 from .ai.providers.ollama_api import OllamaAPI
+# Manifest preflight disabled; rely on syntax/API validator only
 from .pyqgis_executor import EnhancedPyQGISExecutor
 from .ai.utils.pyqgis_api_validator import PyQGISAPIValidator
 
@@ -105,10 +106,29 @@ class CopilotChatDialog(QDialog):
         self._code_editor_dock = None
         self._code_editor_widget = None
         self._last_saved_task_path = None
+        # Request/cancellation state for Send button stop action
+        self._request_in_flight = False
+        self._cancel_next_response = False
         # Track save-prompting per task file
         self._last_prompted_task_file = None
         # Track last saved script path for Execute Last Code
         self._last_saved_task_path = None
+        # Prepublish validation/debug state
+        self._prepublish_enabled = True
+        self._prepublish_intercept = False
+        self._prepublish_attempts = 0
+        self._prepublish_max_attempts = 2
+        self._prepublish_original_user_message = None
+        self._prepublish_working_response = None
+        self._prepublish_inflight = False
+        # Run-after-repair mode (triggered by clicking Run on a code block)
+        self._prepublish_run_after_accept = False
+        self._prepublish_run_saved_path = None
+        self._prepublish_run_filename_hint = None
+        self._prepublish_run_use_console = None
+        self._prepublish_notified = False
+        # Suppress duplicative error echo from logs after we already posted a failure bubble
+        self._suppress_next_error_log_echo = False
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -362,10 +382,13 @@ class CopilotChatDialog(QDialog):
         self.include_logs_cb.setToolTip("Send recent execution logs to AI for better context")
         self.open_on_startup_cb = QCheckBox("Open panel on QGIS startup")
         self.open_on_startup_cb.setToolTip("Automatically open and dock the Copilot panel when QGIS starts.")
+        self.prepublish_validation_cb = QCheckBox("Auto-debug before display (use pre-execution validators)")
+        self.prepublish_validation_cb.setToolTip("Intercept AI replies, validate generated scripts, auto-request fixes, and only then display to users.")
 
         conv_layout.addWidget(self.include_context_cb, 0, 0)
         conv_layout.addWidget(self.include_logs_cb,   1, 0)
         conv_layout.addWidget(self.open_on_startup_cb,2, 0)
+        conv_layout.addWidget(self.prepublish_validation_cb,3, 0)
         conv_group.setLayout(conv_layout)
         layout.addWidget(conv_group)
 
@@ -384,7 +407,7 @@ class CopilotChatDialog(QDialog):
         self.auto_feedback_cb.setToolTip("Automatically ask AI to improve code when execution fails")
         self.auto_feedback_cb.toggled.connect(self.on_auto_feedback_toggled)
         self.run_in_console_cb = QCheckBox("Run via QGIS Python Console (open editor + exec)")
-        self.run_in_console_cb.setToolTip("Writes code to a file in your Workspace, opens it in the QGIS Python Editor, then executes it for native logging/tracebacks.")
+        self.run_in_console_cb.setToolTip("Executes scripts from a saved file path. Disable to execute in memory for best responsiveness.")
         self.strict_validation_cb = QCheckBox("Strict Pre-execution Validation (block on API errors)")
         self.strict_validation_cb.setToolTip("Validates generated code against the live PyQGIS API before running. Blocks execution when errors are detected.")
         self.include_api_sigs_cb = QCheckBox("Include Live PyQGIS API Signatures in Context")
@@ -600,7 +623,8 @@ class CopilotChatDialog(QDialog):
             self._log_buffer = []
             self._log_flush_timer = QTimer(self)
             self._log_flush_timer.setSingleShot(True)
-            self._log_flush_timer.setInterval(250)  # batch within 250ms windows
+            # Increase batching interval to reduce UI churn (smoother scrolling)
+            self._log_flush_timer.setInterval(600)
             self._log_flush_timer.timeout.connect(self._flush_log_buffer)
         except Exception:
             pass
@@ -675,36 +699,57 @@ class CopilotChatDialog(QDialog):
                         QMessageBox.information(self, 'Run Code', 'No code block found for this action.')
                         return
                     if action == 'run':
-                        # Save the script to the workspace (sticky task file) before executing
+                        # Save the script to the workspace (fresh task file) before executing
                         try:
-                            # Derive filename hint from last user message
+                            try:
+                                self.pyqgis_executor.reset_task_file()
+                            except Exception:
+                                pass
                             filename_hint = None
                             for item in reversed(self.chat_history):
                                 if item.get('sender') == 'You':
-                                    filename_hint = (item.get('message') or '').strip().splitlines()[0][:80]
+                                    cand = (item.get('message') or '').strip().splitlines()[0]
+                                    filename_hint = (cand[:80] if cand else None)
                                     break
-                            # Wrap single block as a fenced response for saving convenience
+                            if not filename_hint:
+                                try:
+                                    first = next((ln for ln in code.splitlines() if ln.strip()), '')
+                                    filename_hint = first[:80] if first else None
+                                except Exception:
+                                    filename_hint = None
+                            if not filename_hint:
+                                from datetime import datetime as _dt
+                                filename_hint = f"task_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
                             fenced = f"```python\n{code}\n```"
                             saved_path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=filename_hint, quiet=True)
                             self._last_saved_task_path = saved_path
                         except Exception:
                             saved_path = None
 
-                        header_msg = (
-                            "=" * 50 + "\n"
-                            + f"Executing code block #{idx+1} from AI response (message {mid})..." + "\n"
-                            + "=" * 50
-                        )
-                        self.add_to_execution_results(header_msg)
-                        # Execute according to preference; always saved beforehand
+                        # Inform user where the script was saved
                         try:
-                            if self.run_in_console_cb.isChecked() and saved_path:
+                            if saved_path:
+                                self.add_to_chat("System", f"Script file: {saved_path}", "#6c757d")
+                        except Exception:
+                            pass
+
+                        # Try to run via the QGIS Python Console plugin (terminal)
+                        try:
+                            if saved_path:
+                                self._run_script_via_python_console(saved_path)
+                                return
+                        except Exception:
+                            pass
+
+                        # Fallback: internal executor
+                        try:
+                            if saved_path:
                                 self.pyqgis_executor.execute_task_file(saved_path)
                             else:
                                 self.pyqgis_executor.execute_code(code)
                         except Exception:
-                            # Fallback to in-memory execution if file execution fails
                             self.pyqgis_executor.execute_code(code)
+                        return
                     elif action == 'open':
                         # Save the script to the workspace, then open in the QGIS Python Console editor
                         try:
@@ -790,6 +835,39 @@ class CopilotChatDialog(QDialog):
                     console.runCommand(cmd)
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+    def _run_script_via_python_console(self, file_path: str):
+        """Attempt to execute a saved .py script via QGIS's Python Console plugin (best-effort)."""
+        try:
+            import qgis.utils as qutils
+            pc = None
+            if hasattr(qutils, 'plugins') and isinstance(qutils.plugins, dict):
+                pc = qutils.plugins.get('PythonConsole')
+            # Prefer direct run methods if exposed
+            for run_meth in ('runScriptFile', 'execScriptFile', 'executeScriptFile', 'runFile'):
+                if pc and hasattr(pc, run_meth):
+                    try:
+                        getattr(pc, run_meth)(file_path)
+                        return
+                    except Exception:
+                        pass
+            # Fallback: try to open and run the file in the console editor
+            for open_meth in ('openFileInEditor', 'loadScript', 'addToEditor', 'openScriptFile'):
+                if pc and hasattr(pc, open_meth):
+                    try:
+                        getattr(pc, open_meth)(file_path)
+                        break
+                    except Exception:
+                        pass
+            try:
+                console = getattr(pc, 'console', None)
+                if console and hasattr(console, 'runCommand'):
+                    console.runCommand(f"from pathlib import Path; exec(compile(Path(r'{file_path}').read_text(), r'{file_path}', 'exec'))")
+                    return
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1013,7 +1091,20 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
     
     def send_message(self, message=None, is_programmatic=False):
         """Send a message to QGIS Copilot. Can be called programmatically."""
+        # If user clicks while a request is active, treat as Stop
+        if getattr(self, '_request_in_flight', False) and not is_programmatic:
+            try:
+                self.cancel_current_request()
+            except Exception:
+                pass
+            return
         if not is_programmatic:
+            # New user task: start a fresh script file in the workspace
+            try:
+                if hasattr(self, 'pyqgis_executor') and self.pyqgis_executor:
+                    self.pyqgis_executor.reset_task_file()
+            except Exception:
+                pass
             # Legacy path: only used if a QWidget input exists
             try:
                 if hasattr(self, 'message_input') and self.message_input:
@@ -1050,7 +1141,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
             else:
                 context = log_context
 
-        # Add tool-identification guidance
+        # Keep guidance minimal and focused on complete runnable scripts
         try:
             guidance = (
                 "Tool Identification: First list the relevant PyQGIS classes, functions, "
@@ -1086,12 +1177,97 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
 
         # Skip verbose provider/config snapshot for submitted tasks
 
-        # For Ollama, don't show a blocking progress bar; others keep it
-        if self.current_api_name != "Ollama (Local)":
-            self.show_progress(f"Getting response from {self.current_api_name}...")
+        # Inform user via chat when we will auto-debug, instead of using progress bar
+        if self._prepublish_enabled and not is_programmatic:
+            try:
+                if not self._prepublish_notified:
+                    self.add_to_chat("System", "Copilot is auto-debugging the generated code. See QGIS Log Messages for details.", "#6c757d")
+                    try:
+                        QgsMessageLog.logMessage("Copilot auto-debugging cycle started (Send)", "QGIS Copilot", level=Qgis.Info)
+                    except Exception:
+                        pass
+                    self._prepublish_notified = True
+            except Exception:
+                pass
+
+        # If this is a user-initiated request and prepublish is enabled, enable interception
+        if not is_programmatic and self._prepublish_enabled:
+            self._prepublish_intercept = True
+            self._prepublish_attempts = 0
+            self._prepublish_original_user_message = message
+            # Reset any working state
+            self._prepublish_working_response = None
+            self._prepublish_inflight = False
+
+        # Assign a response guard for this request
+        try:
+            self._response_guard_counter = getattr(self, '_response_guard_counter', 0) + 1
+            self._current_response_guard = self._response_guard_counter
+            try:
+                setattr(self.current_api, '_copilot_guard', self._current_response_guard)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Flip Send → Stop and mark in-flight
+        try:
+            self._set_send_button_state(running=True)
+        except Exception:
+            pass
+        self._request_in_flight = True
+        self._cancel_next_response = False
 
         # Send to API
         self.current_api.send_message(message, context)
+        # Also flip QML composer to in-flight
+        try:
+            if getattr(self, 'qml_root', None) is not None:
+                self.qml_root.setProperty('requestInFlight', True)
+        except Exception:
+            pass
+
+    def _set_send_button_state(self, running: bool):
+        try:
+            if hasattr(self, 'send_button') and self.send_button:
+                if running:
+                    self.send_button.setEnabled(True)
+                    self.send_button.setText("■ Stop")
+                else:
+                    self.send_button.setEnabled(True)
+                    self.send_button.setText("Send")
+        except Exception:
+            pass
+
+    def cancel_current_request(self):
+        """Cancel the in-flight model request (best-effort) and restore UI."""
+        self._cancel_next_response = True
+        try:
+            # ensure cancelled guard is tracked
+            if not hasattr(self, '_cancelled_guards'):
+                self._cancelled_guards = set()
+            self._cancelled_guards.add(getattr(self, '_current_response_guard', 0))
+        except Exception:
+            pass
+        self._request_in_flight = False
+        # Ask provider to cancel if supported
+        try:
+            cancel = getattr(self.current_api, 'cancel', None)
+            if callable(cancel):
+                cancel()
+        except Exception:
+            pass
+        # Restore Send button
+        try:
+            self._set_send_button_state(running=False)
+            if getattr(self, 'qml_root', None) is not None:
+                self.qml_root.setProperty('requestInFlight', False)
+        except Exception:
+            pass
+        # Inform chat
+        try:
+            self.add_to_chat("System", "Request cancelled.", "#6c757d")
+        except Exception:
+            pass
     
     def load_system_prompt(self):
         """Load the system prompt from a Markdown file (preferred) or settings.
@@ -1145,13 +1321,21 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.include_logs_cb.setChecked(settings.value("qgis_copilot/prefs/include_logs", True, type=bool))
         self.auto_execute_cb.setChecked(settings.value("qgis_copilot/prefs/auto_execute", False, type=bool))
         self.auto_feedback_cb.setChecked(settings.value("qgis_copilot/prefs/auto_feedback", False, type=bool))
-        self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", True, type=bool))
+        # Default to in-memory execution to avoid UI overhead
+        self.run_in_console_cb.setChecked(settings.value("qgis_copilot/prefs/run_in_console", False, type=bool))
         self.relaxed_safety_cb.setChecked(settings.value("qgis_copilot/prefs/relaxed_safety", False, type=bool))
         # Docs summary integration removed
         self.open_on_startup_cb.setChecked(settings.value("qgis_copilot/prefs/open_on_startup", True, type=bool))
         self.strict_validation_cb.setChecked(settings.value("qgis_copilot/prefs/strict_validation", False, type=bool))
         self.include_api_sigs_cb.setChecked(settings.value("qgis_copilot/prefs/include_api_signatures", True, type=bool))
         self.auto_feedback_enabled = self.auto_feedback_cb.isChecked()
+        # Prepublish validation (default ON)
+        self._prepublish_enabled = settings.value("qgis_copilot/prefs/prepublish_validation", True, type=bool)
+        self.prepublish_validation_cb.setChecked(self._prepublish_enabled)
+        try:
+            self._prepublish_max_attempts = int(settings.value("qgis_copilot/prefs/prepublish_max_attempts", 2))
+        except Exception:
+            self._prepublish_max_attempts = 2
 
         # Persist on change
         self.include_context_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_context", v))
@@ -1163,6 +1347,11 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.open_on_startup_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/open_on_startup", v))
         self.strict_validation_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/strict_validation", v))
         self.include_api_sigs_cb.toggled.connect(lambda v: QSettings().setValue("qgis_copilot/prefs/include_api_signatures", v))
+        self.prepublish_validation_cb.toggled.connect(self._on_toggle_prepublish_validation)
+
+    def _on_toggle_prepublish_validation(self, enabled: bool):
+        self._prepublish_enabled = bool(enabled)
+        QSettings().setValue("qgis_copilot/prefs/prepublish_validation", self._prepublish_enabled)
 
     def load_workspace_dir(self):
         """Load the workspace directory from settings into the UI."""
@@ -1350,8 +1539,89 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
 
     def handle_api_response(self, response):
         """Handle response from the current API"""
-        self.hide_progress()
-        
+        # No progress bar usage during auto-debugging; use chat + QGIS logs instead
+        # Restore Send button and clear in-flight state
+        try:
+            self._request_in_flight = False
+            self._set_send_button_state(running=False)
+            if getattr(self, 'qml_root', None) is not None:
+                self.qml_root.setProperty('requestInFlight', False)
+        except Exception:
+            pass
+
+        # If prepublish interception is active, validate and possibly auto-repair before showing
+        if self._prepublish_intercept:
+            try:
+                accepted = self._prepublish_process_response(response)
+            except Exception:
+                accepted = True  # fail open to avoid blocking UI on unexpected errors
+            if not accepted:
+                # We have triggered a repair round; do not show anything yet
+                return
+            # else fallthrough to show the final accepted response
+            try:
+                # Reset notice flag for next cycle
+                self._prepublish_notified = False
+                QgsMessageLog.logMessage("Copilot auto-debugging cycle completed (Send)", "QGIS Copilot", level=Qgis.Info)
+            except Exception:
+                pass
+
+        # If a Run action initiated a repair, execute the accepted response silently
+        if getattr(self, '_prepublish_run_after_accept', False) and not getattr(self, '_prepublish_intercept', False):
+            try:
+                # Extract corrected code and execute according to preference
+                blocks = self.pyqgis_executor.extract_code_blocks(response) or []
+            except Exception:
+                blocks = []
+            if not blocks:
+                # No code returned; end gracefully
+                self._reset_prepublish_run_flags()
+                return
+            corrected_code = ("\n\n# --- QGIS Copilot code block separator ---\n\n").join(cb.strip() for cb in blocks).strip()
+            # Persist corrected script to same task file when available
+            try:
+                filename_hint = getattr(self, '_prepublish_run_filename_hint', None)
+                fenced = f"```python\n{corrected_code}\n```"
+                path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=filename_hint, quiet=True)
+                if path:
+                    self._last_saved_task_path = path
+            except Exception:
+                pass
+            # Keep chat clean — skip interim status messages
+            try:
+                use_console = getattr(self, '_prepublish_run_use_console', None)
+                path = getattr(self, '_last_saved_task_path', None)
+                if use_console and path:
+                    self.pyqgis_executor.execute_task_file(path)
+                else:
+                    self.pyqgis_executor.execute_code(corrected_code)
+            except Exception:
+                # Fallback to in-memory execution
+                try:
+                    self.pyqgis_executor.execute_code(corrected_code)
+                except Exception:
+                    pass
+            # Cleanup; do not add this response to chat
+            self._reset_prepublish_run_flags()
+            try:
+                self._prepublish_notified = False
+                QgsMessageLog.logMessage("Copilot auto-debugging cycle completed (Run)", "QGIS Copilot", level=Qgis.Info)
+            except Exception:
+                pass
+            return
+
+        # Ignore if user cancelled or response is stale
+        try:
+            sender_obj = self.sender()
+            guard = getattr(sender_obj, '_copilot_guard', None)
+            if guard in getattr(self, '_cancelled_guards', set()):
+                return
+            if guard is not None and guard != getattr(self, '_current_response_guard', 0):
+                return
+        except Exception:
+            pass
+        if getattr(self, '_cancel_next_response', False):
+            return
         # Add response to chat
         try:
             model = getattr(self.current_api, 'model', None)
@@ -1359,22 +1629,43 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         except Exception:
             ai_label = self.current_api_name
         self.add_to_chat(ai_label, response, "#28a745")
-        
+
         # Store last response for potential execution
         self.last_response = response
-        # Standalone Run button removed; per-code-block Run is available in the response
-        
-        # Do not auto-save the script on response; save only on Run/Open actions
-        
-        # Do not mirror API responses to the Live Logs panel
 
         # Auto-execute if enabled
         if self.auto_execute_cb.isChecked():
+            try:
+                if getattr(self, '_prepublish_enabled', False):
+                    self.add_to_execution_results("Validated and executing…")
+            except Exception:
+                pass
             self.execute_code_from_response(response)
+        # End of response handling
     
     def handle_api_error(self, error):
         """Handle errors from the current API"""
-        self.hide_progress()
+        # Restore Send button and clear in-flight state
+        try:
+            self._request_in_flight = False
+            self._set_send_button_state(running=False)
+            if getattr(self, 'qml_root', None) is not None:
+                self.qml_root.setProperty('requestInFlight', False)
+        except Exception:
+            pass
+
+        # If user cancelled or response is stale, ignore this error completely
+        try:
+            sender_obj = self.sender()
+            guard = getattr(sender_obj, '_copilot_guard', None)
+            if guard in getattr(self, '_cancelled_guards', set()):
+                return
+            if guard is not None and guard != getattr(self, '_current_response_guard', 0):
+                return
+        except Exception:
+            pass
+        if getattr(self, '_cancel_next_response', False):
+            return
 
         # Try to parse for specific, user-friendly error messages
         user_friendly_error = None
@@ -1472,20 +1763,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         self.add_to_execution_results("=" * 50)
         self.add_to_execution_results("Executing code from QGIS Copilot response...")
         self.add_to_execution_results("=" * 50)
-        # Prefer DSL: if a JSON layout/spec is present, render it and return
-        try:
-            spec = self.pyqgis_executor._extract_json_spec_from_response(response)
-        except Exception:
-            spec = None
-        if spec is not None:
-            try:
-                result = self.pyqgis_executor.render_layout_spec(spec)
-                msg = f"Rendered DSL layout: {result}"
-                self.add_to_execution_results(msg)
-                return
-            except Exception as e:
-                self.add_to_execution_results(f"DSL rendering failed: {e}")
-                # Fall through to code execution if present
+        # Layout DSL rendering disabled; proceed to code blocks only
 
         try:
             blocks = self.pyqgis_executor.extract_code_blocks(response) or []
@@ -1503,13 +1781,288 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 # Continue to next block
                 pass
 
+    def _prepublish_process_response(self, response_text: str) -> bool:
+        """Run pre-execution validators on the AI response and auto-repair if needed.
+
+        Returns True if the response is accepted for display; False if a repair round was triggered
+        and the display should be deferred. Keeps validation details internal and not shown to users.
+        """
+        self._prepublish_working_response = response_text
+
+        # Extract merged code from response for validation
+        try:
+            code_blocks = self.pyqgis_executor.extract_code_blocks(response_text) or []
+        except Exception:
+            code_blocks = []
+
+        if not code_blocks:
+            # Nothing to validate; accept as-is
+            self._prepublish_intercept = False
+            return True
+
+        merged_code = ("\n\n# --- block ---\n\n").join(cb.strip() for cb in code_blocks).strip()
+
+        # Run static validation
+        static_issues = []
+        try:
+            static_issues = self.pyqgis_executor._static_validate_code(merged_code) or []
+        except Exception:
+            static_issues = []
+
+        # Manifest preflight disabled
+        preflight_errs = []
+
+        # Run comprehensive API validation if available
+        comp_errors = []
+        try:
+            validator = getattr(self.pyqgis_executor, 'validator', None)
+            if validator is not None:
+                res = validator.validate_code_comprehensively(merged_code)
+                if not res.get('syntax_valid', True):
+                    comp_errors.extend([f"Syntax: {m}" for m in (res.get('syntax_errors') or [])])
+                for e in res.get('attribute_errors') or []:
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — try: {', '.join(sugg)}" if sugg else ""
+                    comp_errors.append(f"Attribute: {base}{hint}")
+                for e in res.get('method_errors') or []:
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — suggestions: {', '.join(sugg)}" if sugg else ""
+                    comp_errors.append(f"Method: {base}{hint}")
+        except Exception:
+            pass
+
+        issues = [*static_issues, *preflight_errs, *comp_errors]
+        # Log issues to QGIS Log Messages for live visibility
+        try:
+            if issues:
+                QgsMessageLog.logMessage(
+                    f"Auto-debug (prepublish): found {len(issues)} issues", "QGIS Copilot", level=Qgis.Info
+                )
+                for msg in issues[:20]:
+                    QgsMessageLog.logMessage(f" - {msg}", "QGIS Copilot", level=Qgis.Info)
+                if len(issues) > 20:
+                    QgsMessageLog.logMessage(
+                        f" ... and {len(issues)-20} more", "QGIS Copilot", level=Qgis.Info
+                    )
+            else:
+                QgsMessageLog.logMessage("Auto-debug (prepublish): no issues detected", "QGIS Copilot", level=Qgis.Info)
+        except Exception:
+            pass
+        if not issues:
+            # Accept and stop interception
+            self._prepublish_intercept = False
+            return True
+
+        # If we have more attempts left, ask the model to repair using the issues
+        if self._prepublish_attempts < max(1, int(self._prepublish_max_attempts)):
+            self._prepublish_attempts += 1
+            repair_prompt = self._compose_repair_prompt(self._prepublish_working_response, merged_code, issues)
+            # Send programmatically; keep interception active so the next response is also validated silently
+            try:
+                # Do not include heavy context; focus on correction
+                self.current_api.send_message(repair_prompt, context=None)
+                self._prepublish_inflight = True
+                # Chat note is already posted when starting the loop
+                try:
+                    total = max(1, int(self._prepublish_max_attempts))
+                    QgsMessageLog.logMessage(
+                        f"Auto-debug (prepublish): requesting fix round {self._prepublish_attempts}/{total}",
+                        "QGIS Copilot",
+                        level=Qgis.Info,
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                # On failure to request repair, accept current to avoid blocking
+                self._prepublish_intercept = False
+                return True
+            return False
+
+        # Attempts exhausted; accept current response
+        self._prepublish_intercept = False
+        return True
+
+    def _compose_repair_prompt(self, last_response: str, merged_code: str, issues: list) -> str:
+        """Build a concise, targeted prompt to fix validation issues in the generated code."""
+        lines = [
+            "Use the following pre-execution validation findings to fix your code before display.",
+            "Return a single, complete, runnable Python script in one fenced block.",
+            "Do not include explanations or extra text.",
+            "",
+            "Validation Findings:",
+        ]
+        # Cap number of issues to avoid overwhelming the model
+        for msg in (issues[:12] if issues else []):
+            lines.append(f"- {msg}")
+        lines.extend([
+            "",
+            "Current Script:",
+            "```python",
+            merged_code,
+            "```",
+        ])
+        return "\n".join(lines)
+
+    def _start_preexecute_debug_flow(self, code: str, saved_path: str = None, filename_hint: str = None):
+        """Validate a code block before execution and auto-repair if needed.
+
+        If validation passes, executes immediately. Otherwise, it triggers an internal
+        repair cycle and executes once a corrected script is received and validated.
+        """
+        self._prepublish_run_after_accept = True
+        self._prepublish_run_saved_path = saved_path
+        self._prepublish_run_filename_hint = filename_hint
+        self._prepublish_run_use_console = bool(self.run_in_console_cb.isChecked())
+
+        # If prepublish is disabled, execute immediately
+        if not getattr(self, '_prepublish_enabled', True):
+            try:
+                if self._prepublish_run_use_console and saved_path:
+                    self.pyqgis_executor.execute_task_file(saved_path)
+                else:
+                    self.pyqgis_executor.execute_code(code)
+            finally:
+                self._reset_prepublish_run_flags()
+            return
+
+        # First-pass validation on provided code
+        merged_code = code.strip()
+        static_issues = []
+        try:
+            static_issues = self.pyqgis_executor._static_validate_code(merged_code) or []
+        except Exception:
+            static_issues = []
+        preflight_errs = []
+        comp_errors = []
+        try:
+            validator = getattr(self.pyqgis_executor, 'validator', None)
+            if validator is not None:
+                res = validator.validate_code_comprehensively(merged_code)
+                if not res.get('syntax_valid', True):
+                    comp_errors.extend([f"Syntax: {m}" for m in (res.get('syntax_errors') or [])])
+                for e in res.get('attribute_errors') or []:
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — try: {', '.join(sugg)}" if sugg else ""
+                    comp_errors.append(f"Attribute: {base}{hint}")
+                for e in res.get('method_errors') or []:
+                    base = e.get('error', '')
+                    sugg = e.get('suggestions') or []
+                    hint = f" — suggestions: {', '.join(sugg)}" if sugg else ""
+                    comp_errors.append(f"Method: {base}{hint}")
+        except Exception:
+            pass
+
+        issues = [*static_issues, *preflight_errs, *comp_errors]
+        if not issues:
+            # Execute immediately; nothing to repair
+            try:
+                try:
+                    QgsMessageLog.logMessage("Auto-debug (Run): no issues detected", "QGIS Copilot", level=Qgis.Info)
+                except Exception:
+                    pass
+                if self._prepublish_run_use_console and saved_path:
+                    self.pyqgis_executor.execute_task_file(saved_path)
+                else:
+                    self.pyqgis_executor.execute_code(code)
+            finally:
+                self._reset_prepublish_run_flags()
+            return
+
+        # Log issues and initiate repair cycle using the code and issues
+        try:
+            QgsMessageLog.logMessage(
+                f"Auto-debug (Run): found {len(issues)} issues", "QGIS Copilot", level=Qgis.Info
+            )
+            for msg in issues[:20]:
+                QgsMessageLog.logMessage(f" - {msg}", "QGIS Copilot", level=Qgis.Info)
+            if len(issues) > 20:
+                QgsMessageLog.logMessage(
+                    f" ... and {len(issues)-20} more", "QGIS Copilot", level=Qgis.Info
+                )
+        except Exception:
+            pass
+        try:
+            self._prepublish_intercept = True
+            self._prepublish_attempts = 0
+            self._prepublish_original_user_message = None
+            self._prepublish_working_response = None
+            self._prepublish_inflight = True
+            repair_prompt = self._compose_repair_prompt("", merged_code, issues)
+            self.current_api.send_message(repair_prompt, context=None)
+            try:
+                total = max(1, int(self._prepublish_max_attempts))
+                QgsMessageLog.logMessage(
+                    f"Auto-debug (Run): requesting fix round 1/{total}", "QGIS Copilot", level=Qgis.Info
+                )
+            except Exception:
+                pass
+        except Exception:
+            # If repair request fails, fallback to executing original code
+            try:
+                if self._prepublish_run_use_console and saved_path:
+                    self.pyqgis_executor.execute_task_file(saved_path)
+                else:
+                    self.pyqgis_executor.execute_code(code)
+            finally:
+                self._reset_prepublish_run_flags()
+
+    def _reset_prepublish_run_flags(self):
+        self._prepublish_run_after_accept = False
+        self._prepublish_run_saved_path = None
+        self._prepublish_run_filename_hint = None
+        self._prepublish_run_use_console = None
+
     def handle_execution_completed(self, result_message, success, execution_log):
         """Handle the completion of a code execution."""
-        # Notify in chat with a brief summary so the user sees outcomes inline
+        # Notify in chat with a brief summary and mirror to QGIS logs
         summary_color = "#28a745" if success else "#dc3545"
         status_text = "succeeded" if success else "failed"
-        # Do not show separate success/failure bubbles; logs will follow immediately
-        pass
+        try:
+            # Compose a 2-part report: script path + execution outcome
+            script_path = getattr(self, '_last_saved_task_path', None)
+            script_part = f"Script file: {script_path}" if script_path else "Script file: (in-memory)"
+            if success:
+                body = ""
+                if execution_log and execution_log.output:
+                    body = f"\n\nOutput:\n```\n{execution_log.output.strip()}\n```"
+                self.add_to_chat("System", f"{script_part}\nRun {status_text}.{body}", summary_color)
+            else:
+                # On failure: still show where the script was saved (if any),
+                # but do not add a separate failure bubble — error logs will follow.
+                if script_path:
+                    try:
+                        self.add_to_chat("System", f"Script file: {script_path}", summary_color)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Mirror status to QGIS Log Messages
+        try:
+            from qgis.core import QgsMessageLog, Qgis
+            if success:
+                QgsMessageLog.logMessage("Run succeeded", "QGIS Copilot", level=Qgis.Info)
+            else:
+                QgsMessageLog.logMessage("Run failed", "QGIS Copilot", level=Qgis.Critical)
+            # Add a single two-part outcome log (script file + outcome)
+            sp = getattr(self, '_last_saved_task_path', None)
+            summary_lines = [f"Script file: {sp or '(in-memory)'}"]
+            if success:
+                summary_lines.append("Status: success")
+                if execution_log and execution_log.output:
+                    summary_lines.append("Output present")
+            else:
+                summary_lines.append("Status: failure")
+                if execution_log and execution_log.error_msg:
+                    summary_lines.append("Error present")
+            QgsMessageLog.logMessage("\n".join(summary_lines), "QGIS Copilot", level=Qgis.Info if success else Qgis.Critical)
+        except Exception:
+            pass
+        # Do not suppress error log echo; show real logs in chat after the result bubble
+
+        # Do not auto-reply logs back to AI; this is triggered explicitly by the Debug button
         # Flush any buffered logs immediately
         try:
             if hasattr(self, '_log_flush_timer') and self._log_flush_timer:
@@ -1533,17 +2086,79 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         else:
             # On success, clear any previous failure; keep Retry enabled so user can retry query
             self.pending_failed_execution = None
-            # Removed redundant post-success save prompt; script is already saved once per response
 
     def handle_logs_updated(self, formatted_log_entry):
         """Append new log entry to the live display with batching to reduce UI churn."""
         try:
+            if formatted_log_entry:
+                # Always mirror to QGIS Log Messages
+                try:
+                    QgsMessageLog.logMessage(formatted_log_entry, "QGIS Copilot", level=Qgis.Info)
+                except Exception:
+                    pass
+            # Echo execution logs into chat unless in prepublish auto-debugging
+            if getattr(self, '_prepublish_intercept', False) or getattr(self, '_prepublish_run_after_accept', False):
+                return
+
+            # Special-case: show pre-execution validation as a concise OUTPUT block
+            try:
+                txt = formatted_log_entry or ""
+                marker = None
+                if "Pre-execution validation:" in txt:
+                    marker = "Pre-execution validation:"
+                elif "Static validation results:" in txt:
+                    marker = "Static validation results:"
+                if marker:
+                    start = txt.find(marker)
+                    sep = "\n" + ("-" * 50)
+                    end = txt.find(sep, start)
+                    if end == -1:
+                        end = len(txt)
+                    payload = txt[start:end].rstrip()
+                    # Present as an OUTPUT section in a fenced code block so the Debug button appears
+                    md = "OUTPUT:\n```\n" + payload + "\n```"
+                    self.add_to_chat("System", md, "#6c757d")
+                    return
+            except Exception:
+                pass
+
+            # Special-case: runtime errors/tracebacks in a fenced code block with Debug action
+            try:
+                txt = (formatted_log_entry or "")
+                low = txt.lower()
+                if ("traceback" in low) or ("execution error" in low):
+                    # Extract from first occurrence to end (or up to dashed separator if present)
+                    start = txt.lower().find("traceback")
+                    if start == -1:
+                        start = txt.lower().find("execution error")
+                    sep = "\n" + ("-" * 50)
+                    end = txt.find(sep, start) if start != -1 else -1
+                    if start == -1:
+                        start = 0
+                    if end == -1:
+                        end = len(txt)
+                    payload = txt[start:end].rstrip()
+                    md = "OUTPUT:\n```\n" + payload + "\n```"
+                    self.add_to_chat("System", md, "#6c757d")
+                    return
+            except Exception:
+                pass
+
+            # Suppress the next error echo if we already posted a failure bubble
+            if getattr(self, '_suppress_next_error_log_echo', False):
+                txt = formatted_log_entry or ""
+                low = txt.lower()
+                if ("error:" in low) or ("execution error" in low) or ("traceback" in low):
+                    self._suppress_next_error_log_echo = False
+                    return
+
             if not hasattr(self, '_log_buffer'):
                 self._log_buffer = []
             self._log_buffer.append(formatted_log_entry or "")
             if hasattr(self, '_log_flush_timer') and self._log_flush_timer:
                 if not self._log_flush_timer.isActive():
                     self._log_flush_timer.start()
+            return
         except Exception:
             # Fallback: direct append if buffering unavailable
             self.add_to_execution_results(formatted_log_entry)
@@ -1558,6 +2173,31 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 return
             chunk = "\n".join(self._log_buffer)
             self._log_buffer = []
+            # Filter out pre-execution validation chatter when prepublish is enabled
+            try:
+                if getattr(self, '_prepublish_enabled', False):
+                    deny_markers = (
+                        'Pre-execution validation:',
+                        'Static validation results:',
+                        'Execution blocked by Strict Validation',
+                        'Execution blocked: missing agent header JSON',
+                        'Execution blocked by manifest preflight',
+                        'Blocked: unknown symbols in header',
+                    )
+                    parts = chunk.split("\n" + ("-" * 50) + "\n") if ("-" * 50) in chunk else [chunk]
+                    kept = []
+                    for p in parts:
+                        # If any deny marker appears in this part, drop it silently
+                        if any(m in p for m in deny_markers):
+                            continue
+                        if p.strip():
+                            kept.append(p)
+                    filtered = ("\n" + ("-" * 50) + "\n").join(kept)
+                    if filtered.strip():
+                        self.add_to_execution_results(filtered)
+                    return
+            except Exception:
+                pass
             self.add_to_execution_results(chunk)
         except Exception:
             pass
@@ -1599,14 +2239,62 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         if not code:
             return
         try:
+            saved_path = None
             if hasattr(self, 'run_in_console_cb') and self.run_in_console_cb.isChecked():
                 fenced = f"```python\n{code}\n```"
-                path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint="qml_chat_task", quiet=True)
-                self.pyqgis_executor.execute_task_file(path)
+                # Ensure a fresh task file per run
+                try:
+                    self.pyqgis_executor.reset_task_file()
+                except Exception:
+                    pass
+                # Derive filename hint
+                hint = None
+                try:
+                    for item in reversed(self.chat_history):
+                        if item.get('sender') == 'You':
+                            cand = (item.get('message') or '').strip().splitlines()[0]
+                            hint = cand[:80] if cand else None
+                            break
+                except Exception:
+                    hint = None
+                if not hint:
+                    try:
+                        first = next((ln for ln in code.splitlines() if ln.strip()), '')
+                        hint = first[:80] if first else None
+                    except Exception:
+                        hint = None
+                if not hint:
+                    from datetime import datetime as _dt
+                    hint = f"task_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+                saved_path = self.pyqgis_executor.save_response_to_task_file(fenced, filename_hint=hint, quiet=True)
+
+            # Inform user where the script was saved and log intent
+            try:
+                if saved_path:
+                    # Show saved path in chat so users can find the file
+                    self.add_to_chat("System", f"Script file: {saved_path}", "#6c757d")
+                QgsMessageLog.logMessage(
+                    f"Executing script (first try){' — ' + saved_path if saved_path else ''}",
+                    "QGIS Copilot",
+                    level=Qgis.Info,
+                )
+            except Exception:
+                pass
+
+            # Execute immediately (first try)
+            if saved_path and self.run_in_console_cb.isChecked():
+                self.pyqgis_executor.execute_task_file(saved_path)
             else:
                 self.pyqgis_executor.execute_code(code)
         except Exception:
-            self.pyqgis_executor.execute_code(code)
+            # Fallback to immediate execution
+            try:
+                if saved_path and self.run_in_console_cb.isChecked():
+                    self.pyqgis_executor.execute_task_file(saved_path)
+                else:
+                    self.pyqgis_executor.execute_code(code)
+            except Exception:
+                self.pyqgis_executor.execute_code(code)
 
     def on_qml_run(self, msg: str):
         try:
@@ -1623,6 +2311,26 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         """User requested debugging based on QGIS logs from the QML panel."""
         try:
             logs = (logs_text or '').strip()
+            if not logs:
+                # Fallback: construct a two-part log from last execution
+                sp = getattr(self, '_last_saved_task_path', None)
+                last = None
+                try:
+                    if getattr(self.pyqgis_executor, 'execution_history', None):
+                        last = self.pyqgis_executor.execution_history[-1]
+                except Exception:
+                    last = None
+                parts = [f"Script file: {sp or '(in-memory)'}"]
+                if last is not None:
+                    if last.success:
+                        parts.append("Status: success")
+                        if last.output:
+                            parts.append("Output:\n" + (last.output or '').strip())
+                    else:
+                        parts.append("Status: failure")
+                        if last.error_msg:
+                            parts.append("Error:\n" + last.error_msg)
+                logs = "\n\n".join(parts)
             # Find the last AI message and extract its code blocks if available
             last_ai_msg = None
             for item in reversed(self.chat_history):
@@ -1711,12 +2419,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
         except Exception:
             pass
 
-        # Directly notify embedded QML, if available (belt-and-suspenders)
-        try:
-            if getattr(self, 'qml_root', None) is not None and hasattr(self.qml_root, 'appendMessage'):
-                self.qml_root.appendMessage(role, message, iso_ts)
-        except Exception:
-            pass
+        # Avoid double-notifying QML to prevent duplicate bubbles; rely on chat_message_added
 
     def render_message(self, sender, message, color, timestamp):
         """Render a single chat message using Qt's native Markdown support when appropriate."""
@@ -2396,15 +3099,13 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
                 cursor.insertBlock()
             except Exception:
                 pass
-            cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
-            ts = datetime.now().strftime("%H:%M:%S")
+            cursor.insertHtml("<div style='height:12px'>&nbsp;</div>")
             container = (
                 "<div style=\"margin:12px 5px; text-align:left;\">"
                 "<div style=\"display:inline-block; max-width:90%; background:#ffffff; border:1px solid #e0e0e0; "
                 "border-radius:14px; box-shadow:0 2px 6px rgba(0,0,0,0.08); border-left:4px solid #6c757d;\">"
                 "<div style=\"padding:8px 12px; border-bottom:1px solid #e0e0e0;\">"
                 "<strong style=\"color:#6c757d; font-size:11pt;\">PyQGIS</strong>"
-                f"<span style=\"color:#6c757d; font-size:9pt; margin-left:8px;\">({ts})</span>"
                 "</div>"
                 "<div style=\"background:#f5f5f5; color:#333; border:1px solid #ddd; border-top:none; "
                 "padding:8px 10px; border-bottom-left-radius:14px; border-bottom-right-radius:14px; "
@@ -2416,7 +3117,7 @@ Ollama runs models locally — no API key required. Install and start Ollama, th
             )
             cursor.insertHtml(container)
             try:
-                cursor.insertHtml("<div style='height:20px'>&nbsp;</div>")
+                cursor.insertHtml("<div style='height:12px'>&nbsp;</div>")
             except Exception:
                 pass
             try:

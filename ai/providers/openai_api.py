@@ -4,7 +4,7 @@ OpenAI API Integration for QGIS Copilot
 
 import json
 import requests
-from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QObject, pyqtSignal, QThread
 from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsMapLayer
 
 
@@ -209,8 +209,37 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
         """Get the stored API key"""
         return self.settings.value("qgis_copilot/openai_api_key", "")
 
+    class _Worker(QThread):
+        result = pyqtSignal(str)
+        failed = pyqtSignal(str)
+
+        def __init__(self, url, headers, payload, timeout=45):
+            super().__init__()
+            self.url = url
+            self.headers = headers
+            self.payload = payload
+            self.timeout = timeout
+
+        def run(self):
+            try:
+                response = requests.post(self.url, headers=self.headers, json=self.payload, timeout=self.timeout)
+                if response.status_code == 200:
+                    data = response.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0]["message"]["content"]
+                        if content and isinstance(content, str):
+                            self.result.emit(content.strip())
+                        else:
+                            self.failed.emit("No response generated.")
+                    else:
+                        self.failed.emit(f"No response generated. Payload: {data}")
+                else:
+                    self.failed.emit(f"API Error {response.status_code}: {response.text}")
+            except Exception as e:
+                self.failed.emit(f"Request failed: {e}")
+
     def send_message(self, message, context=None):
-        """Send a message to OpenAI API with QGIS context"""
+        """Send a message to OpenAI API with QGIS context (runs in a worker thread)."""
         if not self.api_key:
             self.error_occurred.emit("No OpenAI API key configured")
             return
@@ -235,25 +264,30 @@ Remember: You're following the official PyQGIS Developer Cookbook patterns and b
             "max_tokens": 2048,
         }
 
+        worker = OpenAIAPI._Worker(url, headers, payload, timeout=45)
+        self._current_worker = worker
+        worker.result.connect(self.response_received.emit)
+        worker.failed.connect(self.error_occurred.emit)
+        worker.finished.connect(lambda: setattr(self, "_current_worker", None))
+        worker.start()
+
+    def cancel(self):
+        """Cancel in-flight worker (best-effort)."""
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=45)
-
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"]["content"]
-                    self.response_received.emit(content.strip())
-                else:
-                    self.error_occurred.emit(f"No response generated. Payload: {data}")
-            else:
-                error_msg = f"API Error {response.status_code}: {response.text}"
-                self.error_occurred.emit(error_msg)
-                QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
-
-        except Exception as e:
-            error_msg = f"Request failed: {str(e)}"
-            self.error_occurred.emit(error_msg)
-            QgsMessageLog.logMessage(error_msg, "QGIS Copilot", level=Qgis.Critical)
+            w = getattr(self, "_current_worker", None)
+            if w and w.isRunning():
+                try:
+                    w.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    w.terminate()
+                except Exception:
+                    pass
+                self._current_worker = None
+                self.error_occurred.emit("Request cancelled by user")
+        except Exception:
+            pass
 
     def get_qgis_context(self, iface):
         """Extract current QGIS context information"""

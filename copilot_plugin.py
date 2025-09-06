@@ -91,20 +91,9 @@ class QGISCopilotPlugin:
         # Will be set False in run()
         self.first_start = True
 
-        # Build/refresh the live PyQGIS API manifest for this QGIS version
-        try:
-            from .copilot.manifest.qgis_manifest_build import build_manifest
-            path = build_manifest()
-            QgsApplication.messageLog().logMessage(
-                f"QGIS Copilot: Built PyQGIS manifest at {path}", "QGIS Copilot"
-            )
-        except Exception as e:
-            try:
-                QgsApplication.messageLog().logMessage(
-                    f"QGIS Copilot: Manifest build failed: {e}", "QGIS Copilot"
-                )
-            except Exception:
-                pass
+        # Developer tools disabled per request
+
+        # Manifest build removed per request
 
         # Auto-open on startup if configured
         settings = QSettings()

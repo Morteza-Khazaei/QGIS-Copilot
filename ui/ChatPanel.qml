@@ -46,6 +46,10 @@ Rectangle {
     signal runCodeRequested(string code)
     signal debugRequested(string info)
     signal clearRequested()          // ask host to clear chat/logs
+    signal stopRequested()           // ask host to cancel in-flight request
+
+    // Execution state reflected in the composer
+    property bool requestInFlight: false
 
     // ---- Model the dock calls into via root.appendMessage(role, text, ts) ----
     ListModel { id: chatModel }
@@ -227,17 +231,9 @@ Rectangle {
                         // QGIS/system reply helper description and actions
                         Item {
                             id: sysHelper
-                            visible: isQgis || roleNorm === 'system'
+                            visible: false   // keep chat clean; no extra helper text for QGIS/system replies
                             width: parent.width
-                            height: visible ? (desc1.implicitHeight + desc2.implicitHeight + (dbgBtn.visible ? 28 : 0) + 6) : 0
-
-                            Column {
-                                spacing: 2
-                                width: parent.width
-                                Label { id: desc1; text: "QGIS Reply"; color: faintText; font.pixelSize: 12 }
-                                Label { id: desc2; text: "These are logs and messages from executing your script."; color: faintText; font.pixelSize: 11 }
-                                // Debug button moved to code block hover header for consistency
-                            }
+                            height: 0
                         }
 
                         // Render message as blocks so code blocks can have per-block actions
@@ -414,7 +410,8 @@ Rectangle {
                                         textFormat: Text.PlainText
                                         wrapMode: Text.WrapAnywhere
                                         font.family: "monospace"
-                                        font.pixelSize: 13
+                                        // Slightly smaller than normal chat text for better density
+                                        font.pixelSize: 12
                                         color: "#000000"    // black code text for higher contrast
                                         anchors {
                                             left: parent.left; right: parent.right
@@ -515,36 +512,45 @@ Rectangle {
             Button {
                 id: sendBtn
                 text: ""
-                Accessible.name: "Send message"
-                enabled: (input.text || "").trim().length > 0
+                Accessible.name: root.requestInFlight ? "Stop request" : "Send message"
+                enabled: root.requestInFlight || (input.text || "").trim().length > 0
                 hoverEnabled: true
                 implicitWidth: 36
                 implicitHeight: 36
                 background: Rectangle {
                     radius: 18
-                    color: !sendBtn.enabled ? "#b9d0f5"
-                          : sendBtn.pressed ? "#0a58ca"
-                          : sendBtn.hovered ? "#0b66f0"
-                          : "#0b5ed7"
+                    color: root.requestInFlight
+                           ? (sendBtn.pressed ? "#b22222" : (sendBtn.hovered ? "#dc3545" : "#c82333"))
+                           : (!sendBtn.enabled ? "#b9d0f5"
+                              : sendBtn.pressed ? "#0a58ca"
+                              : sendBtn.hovered ? "#0b66f0"
+                              : "#0b5ed7")
                     border.width: 1
-                    border.color: !sendBtn.enabled ? "#9bb9e8" : "#0a58ca"
+                    border.color: root.requestInFlight ? "#a71d2a" : (!sendBtn.enabled ? "#9bb9e8" : "#0a58ca")
                     Behavior on color { ColorAnimation { duration: 100 } }
                 }
                 contentItem: Text {
-                    // Paper-plane style arrow
-                    text: "➤"
+                    text: root.requestInFlight ? "■" : "➤"
                     color: "#ffffff"
                     font.pixelSize: 16
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
+                ToolTip.visible: sendBtn.hovered
+                ToolTip.text: root.requestInFlight ? "Stop current request" : "Send message"
                 onClicked: {
+                    if (root.requestInFlight) {
+                        root.stopRequested();
+                        root.requestInFlight = false;
+                        return;
+                    }
                     var msg = (input.text || "").trim();
                     if (!msg.length) return;
                     // Echo immediately
                     root.appendMessage('user', msg, "");
                     // Forward to Python bridge
                     root.runRequested(msg);
+                    root.requestInFlight = true;
                     input.text = "";
                 }
             }
